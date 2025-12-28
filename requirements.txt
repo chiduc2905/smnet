@@ -1,0 +1,13 @@
+torch>=2.0.0
+torchvision>=0.15.0
+numpy>=1.21.0
+scikit-learn>=1.0.0
+tqdm>=4.60.0
+Pillow>=8.0.0
+matplotlib>=3.0.0
+seaborn>=0.11.0
+scipy>=1.7.0
+tsnecuda; platform_system == "Linux"
+wandb>=0.12.0
+thop>=0.1.1  # For FLOPs/MACs calculation
+
