@@ -8,7 +8,7 @@ def get_args():
     parser = argparse.ArgumentParser(description='Run all SMNet experiments')
     parser.add_argument('--project', type=str, default='smnet', help='WandB project name')
     parser.add_argument('--dataset_path', type=str, 
-                        default='/mnt/disk2/nhatnc/res/scalogram_fewshot/pulse_fewshot/scalogram_minh',
+                        default='./scalogram_minh',
                         help='Path to dataset')
     parser.add_argument('--dataset_name', type=str, default='minh', help='Dataset name for logging')
     return parser.parse_args()
