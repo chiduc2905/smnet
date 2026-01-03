@@ -152,14 +152,13 @@ class LocalMidBranch(nn.Module):
 
 
 # =============================================================================
-# Branch 2: Vision State Space (VSS) Block
+# Branch 2: Vision State Space (VSS) Block - Lightweight for 64x64 Few-Shot
 # =============================================================================
 
 class VSSBlock(nn.Module):
-    """Vision State Space (VSS) Block for global feature extraction.
+    """Lightweight VSS Block optimized for 64×64 few-shot learning.
     
-    Standard VSS Block architecture from vision Mamba papers:
-    
+    Architecture:
         Input X
             ↓
         ┌─────────────────────────────────────────────┐
@@ -168,37 +167,27 @@ class VSSBlock(nn.Module):
             ↓
         ┌─────────────────────────────────────────────┐
         │ SS2D Block:                                 │
-        │   Linear (1×1 conv) → DWConv(k=3) → SiLU   │
-        │   → SS2D (4-way scan) → LN → Linear (1×1)   │
+        │   Linear (C→C) → DWConv(k=3) → SiLU        │
+        │   → SS2D (4-way scan) → LN → Linear (C→C)   │
         └─────────────────────────────────────────────┘
             ↓
         ┌─────────────────────────────────────────────┐
-        │ First Residual: X2 = X + SS2D_Block(X1)     │
-        └─────────────────────────────────────────────┘
-            ↓
-        ┌─────────────────────────────────────────────┐
-        │ FFN: LN → Linear → SiLU → Linear            │
-        └─────────────────────────────────────────────┘
-            ↓
-        ┌─────────────────────────────────────────────┐
-        │ Second Residual: Y = X2 + FFN(LN(X2))       │
+        │ Residual: Y = X + SS2D_Block(X1)            │
         └─────────────────────────────────────────────┘
             ↓
         Output Y
     
-    Key Design:
-        - NO gating branch (pure sequential)
-        - Two residual connections (after SS2D, after FFN)
-        - LayerNorm throughout (not BatchNorm)
-        - Linear residual paths (no activation on residual)
-        - 4-way SS2D with independent Mamba modules (no weight sharing)
+    Key Design (optimized for few-shot):
+        - expand=1: No channel expansion (C→C, not C→2C)
+        - d_conv=3: Smaller kernel for short sequences
+        - NO FFN: Removed to prevent overfitting
+        - Single residual connection
+        - 4-way SS2D with independent Mamba modules
     
     Args:
         d_model: Model dimension (channels)
         d_state: SSM state dimension (default: 4)
-        d_conv: Local convolution width in Mamba (default: 4)
-        expand: Expansion factor for SS2D inner dimension (default: 2)
-        ffn_expand: FFN expansion factor (default: 4)
+        d_conv: Local convolution width in Mamba (default: 3)
         dw_kernel: Depthwise conv kernel size (default: 3)
     """
     
@@ -206,16 +195,14 @@ class VSSBlock(nn.Module):
         self,
         d_model: int,
         d_state: int = 4,
-        d_conv: int = 4,
-        expand: int = 2,
-        ffn_expand: int = 4,
-        dw_kernel: int = 3
+        d_conv: int = 3,
+        dw_kernel: int = 3,
+        **kwargs  # Ignore unused args like expand, ffn_expand
     ):
         super().__init__()
         
         self.d_model = d_model
-        self.d_inner = int(expand * d_model)
-        self.ffn_hidden = int(ffn_expand * d_model)
+        self.d_inner = d_model  # expand=1, no expansion
         
         if not MAMBA_AVAILABLE:
             raise ImportError(
@@ -228,9 +215,9 @@ class VSSBlock(nn.Module):
         self.norm1 = nn.LayerNorm(d_model)
         
         # =============================================
-        # SS2D Block
+        # SS2D Block (Lightweight: C → C)
         # =============================================
-        # Linear (1×1 conv equivalent)
+        # Linear (no expansion)
         self.in_proj = nn.Linear(d_model, self.d_inner, bias=False)
         
         # Depthwise Conv (k=3)
@@ -251,18 +238,10 @@ class VSSBlock(nn.Module):
         # Post-SS2D LayerNorm
         self.norm_ss2d = nn.LayerNorm(self.d_inner)
         
-        # Output Linear (1×1 conv equivalent)
+        # Output Linear
         self.out_proj = nn.Linear(self.d_inner, d_model, bias=False)
         
-        # =============================================
-        # Lightweight FFN Block: C → C → C (no expansion)
-        # =============================================
-        self.norm2 = nn.LayerNorm(d_model)
-        self.ffn = nn.Sequential(
-            nn.Linear(d_model, d_model, bias=False),
-            nn.GELU(),
-            nn.Linear(d_model, d_model, bias=False)
-        )
+        # NO FFN - removed for few-shot learning
     
     def _ss2d_forward(self, x: torch.Tensor, H: int, W: int) -> torch.Tensor:
         """Apply 4-way SS2D scanning (no weight sharing).
@@ -295,7 +274,7 @@ class VSSBlock(nn.Module):
         y_bt = torch.flip(y_bt, dims=[1])
         y_bt = y_bt.view(B, W, H, D).permute(0, 2, 1, 3).contiguous().view(B, L, D)
         
-        # Average fusion (standard in VSS)
+        # Average fusion
         y_fused = (y_lr + y_rl + y_tb + y_bt) / 4.0
         
         return y_fused
@@ -315,14 +294,14 @@ class VSSBlock(nn.Module):
         x_flat = x.permute(0, 2, 3, 1).reshape(B, L, C)
         
         # =============================================
-        # Stage 1: Pre-LN → SS2D Block → Residual
+        # Pre-LN → SS2D Block → Residual
         # =============================================
         
         # Pre-Normalization: X1 = LN(X)
         x1 = self.norm1(x_flat)
         
         # SS2D Block:
-        # 1. Linear projection
+        # 1. Linear projection (no expansion: C → C)
         h = self.in_proj(x1)  # (B, L, d_inner)
         
         # 2. DWConv (need spatial reshape)
@@ -342,18 +321,8 @@ class VSSBlock(nn.Module):
         # 6. Linear projection back
         h = self.out_proj(h)  # (B, L, C)
         
-        # First Residual: X2 = X + SS2D_Block(X1)
-        x2 = x_flat + h
-        
-        # =============================================
-        # Stage 2: LN → FFN → Residual
-        # =============================================
-        
-        # FFN: LN → Linear → SiLU → Linear
-        h2 = self.ffn(self.norm2(x2))
-        
-        # Second Residual: Y = X2 + FFN(LN(X2))
-        y = x2 + h2
+        # Residual: Y = X + SS2D_Block(X1)
+        y = x_flat + h
         
         # Reshape back: (B, L, C) -> (B, C, H, W)
         y = y.reshape(B, H, W, C).permute(0, 3, 1, 2)
@@ -417,13 +386,11 @@ class DualBranchFusion(nn.Module):
         # Branch 1: Local-Mid Spatial & Channel
         self.local_branch = LocalMidBranch(channels, dilation=dilation)
         
-        # Branch 2: Global VSS Block (standard vision Mamba)
+        # Branch 2: Lightweight VSS Block (optimized for few-shot)
         self.global_branch = VSSBlock(
             d_model=channels,
             d_state=d_state,
-            d_conv=4,
-            expand=2,
-            ffn_expand=4
+            d_conv=3  # Smaller kernel for short sequences
         )
         
         # Fusion: Concat (2C) -> Proj (C)
