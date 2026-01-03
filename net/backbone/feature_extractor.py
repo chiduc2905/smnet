@@ -347,15 +347,15 @@ class SlotFeatureExtractor(nn.Module):
         features = self.channel_proj(features)
         
         # Stage 4: Dual-branch local-global fusion
-        features = self.dual_branch(features)  # (B, hidden_dim, 28, 28)
+        features = self.dual_branch(features)  # (B, hidden_dim, H', W')
         
-        # Stage 5: Slot attention - semantic grouping
-        slots, slot_weights = self.slot_attention(features)  # (B, K, hidden_dim)
+        # Stage 5: Slot attention - semantic grouping (with attention maps)
+        slots, slot_weights, attn = self.slot_attention(features, return_attn=True)  # (B, K, hidden_dim), (B, K), (B, K, H'*W')
         
         # Stage 6: Slot-level global reasoning
         slots = self.slot_mamba(slots)  # (B, K, hidden_dim)
         
-        return slots, slot_weights
+        return slots, slot_weights, features, attn
     
     def extract_weighted_slots(
         self,
@@ -371,7 +371,7 @@ class SlotFeatureExtractor(nn.Module):
         Returns:
             (B, K, hidden_dim) weighted slot descriptors
         """
-        slots, slot_weights = self.forward(x)
+        slots, slot_weights, _, _ = self.forward(x)
         
         if slot_weights is not None:
             return slots * slot_weights.unsqueeze(-1)

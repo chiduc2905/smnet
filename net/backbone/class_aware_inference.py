@@ -86,15 +86,22 @@ class ClassAwareInferenceHead(nn.Module):
     
     def compute_class_embeddings(
         self,
-        support_slots: List[torch.Tensor],
+        support_patches_list: List[torch.Tensor],
+        support_attn_list: List[torch.Tensor],
+        support_slots: Optional[List[torch.Tensor]] = None,
         support_weights: Optional[List[torch.Tensor]] = None
     ) -> torch.Tensor:
-        """Compute class embeddings from support slots.
+        """Compute class embeddings using Slot-Weighted Spatial Patches.
         
-        Step 3: For each class, aggregate slot representations from support samples.
+        Hybrid approach: Uses spatial patches (N samples) weighted by slot attention
+        for robust class prototype estimation.
+        
+        Step 3: For each class, compute weighted average of spatial patches.
         
         Args:
-            support_slots: List of (Shot, K, C) slot tensors, one per class
+            support_patches_list: List of (Shot, N, C) patch tensors per class
+            support_attn_list: List of (Shot, K, N) attention tensors per class
+            support_slots: Optional list of (Shot, K, C) - kept for compatibility
             support_weights: Optional list of (Shot, K) slot weights
             
         Returns:
@@ -102,19 +109,34 @@ class ClassAwareInferenceHead(nn.Module):
         """
         class_embeddings = []
         
-        for m, slots in enumerate(support_slots):
-            # slots: (Shot, K, C)
-            Shot, K, C = slots.shape
+        for m in range(len(support_patches_list)):
+            patches = support_patches_list[m]  # (Shot, N, C)
+            attn = support_attn_list[m]  # (Shot, K, N)
+            Shot, N, C = patches.shape
             
+            # Compute pixel importance from slot attention
+            # Max over slots: pixels strongly assigned to ANY slot are important
+            pixel_importance = attn.max(dim=1)[0]  # (Shot, N)
+            
+            # Optionally weight by slot existence scores
             if support_weights is not None and support_weights[m] is not None:
-                # Weight slots by existence scores
-                weights = support_weights[m]  # (Shot, K)
-                weighted_slots = slots * weights.unsqueeze(-1)  # (Shot, K, C)
-                # Sum over slots and shots, normalize
-                class_emb = weighted_slots.sum(dim=(0, 1)) / (weights.sum() + 1e-8)
-            else:
-                # Simple mean over slots and shots
-                class_emb = slots.mean(dim=(0, 1))  # (C,)
+                slot_weights = support_weights[m]  # (Shot, K)
+                # Weight attention by slot existence before taking max
+                weighted_attn = attn * slot_weights.unsqueeze(-1)  # (Shot, K, N)
+                pixel_importance = weighted_attn.max(dim=1)[0]  # (Shot, N)
+            
+            # Normalize pixel importance to sum to 1
+            pixel_importance = pixel_importance / (pixel_importance.sum(dim=-1, keepdim=True) + 1e-8)
+            
+            # Weighted average of patches across spatial and shot dimensions
+            # patches: (Shot, N, C), pixel_importance: (Shot, N)
+            weighted_patches = patches * pixel_importance.unsqueeze(-1)  # (Shot, N, C)
+            
+            # Sum over N and Shot, get class embedding
+            class_emb = weighted_patches.sum(dim=(0, 1))  # (C,)
+            
+            # L2 normalize for stable similarity computation
+            class_emb = F.normalize(class_emb, dim=-1)
             
             class_embeddings.append(class_emb)
         
@@ -290,9 +312,12 @@ class ClassAwareInferenceHead(nn.Module):
         NQ = query_patches.shape[0]
         M = len(support_slots_list)  # Number of classes (Way)
         
-        # Step 3: Compute class embeddings
+        # Step 3: Compute class embeddings using Slot-Weighted Spatial Patches
         class_embeddings = self.compute_class_embeddings(
-            support_slots_list, support_weights_list
+            support_patches_list=support_patches_list,
+            support_attn_list=support_attn_list,
+            support_slots=support_slots_list,
+            support_weights=support_weights_list
         )  # (M, C)
         
         scores = []

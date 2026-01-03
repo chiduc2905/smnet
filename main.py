@@ -128,7 +128,7 @@ def train_loop(net, train_loader, val_X, val_y, args):
     # Calculate feature dimension dynamically
     with torch.no_grad():
         dummy_input = torch.randn(1, 1, args.image_size, args.image_size).to(device)
-        dummy_slots, _ = net.encoder(dummy_input)
+        dummy_slots, _, _, _ = net.encoder(dummy_input)
         feat_dim = dummy_slots.view(1, -1).size(1)
         
     criterion_center = CenterLoss(num_classes=args.way_num, feat_dim=feat_dim, device=device)
@@ -175,7 +175,7 @@ def train_loop(net, train_loader, val_X, val_y, args):
             # Center Loss (optional)
             if args.lambda_center > 0:
                 q_flat = query.view(-1, C, H, W)
-                slots, _ = net.encoder(q_flat)
+                slots, _, _, _ = net.encoder(q_flat)
                 features = slots.view(slots.size(0), -1)
                 features = F.normalize(features, p=2, dim=1)
                 loss_center = criterion_center(features, targets)

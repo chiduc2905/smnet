@@ -75,52 +75,105 @@ class SpatialGate(nn.Module):
         return x * self.gate(x)
 
 
-class LocalMidBranch(nn.Module):
-    """Local-Mid Spatial & Channel Branch (ConvMixer++ style).
+class ECAPlus(nn.Module):
+    """Enhanced Channel Attention (ECA++) using 1D convolution.
     
-    Focuses on local and mid-range spatial interactions without global attention.
+    More efficient than SE block - uses 1D conv instead of FC layers.
+    Adaptive kernel size based on channel count.
+    """
     
-    Components:
-        1. Depthwise Conv (k=3) + BN + GELU for local spatial modeling
-        2. Dilated Depthwise Conv (k=3, d=2) + BN + GELU for mid-range spatial
-        3. Lightweight spatial gating (sigmoid-activated DW conv)
-        4. Pointwise (1×1) conv + BN + GELU for channel mixing
-        5. SE-Lite for channel interaction
+    def __init__(self, channels: int, gamma: int = 2, b: int = 1):
+        super().__init__()
+        # Adaptive kernel size: k = |log2(C)/gamma + b/gamma|_odd
+        t = int(abs(math.log2(channels) / gamma + b / gamma))
+        k = t if t % 2 else t + 1  # Ensure odd
+        k = max(k, 3)  # Minimum kernel size 3
+        
+        self.gap = nn.AdaptiveAvgPool2d(1)
+        self.conv1d = nn.Conv1d(1, 1, kernel_size=k, padding=k // 2, bias=False)
+        self.sigmoid = nn.Sigmoid()
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        B, C, H, W = x.shape
+        # GAP: (B, C, 1, 1) -> (B, C, 1) -> (B, 1, C)
+        y = self.gap(x).view(B, C, 1).transpose(1, 2)  # (B, 1, C)
+        # Conv1D across channels
+        y = self.conv1d(y)  # (B, 1, C)
+        y = self.sigmoid(y).transpose(1, 2).view(B, C, 1, 1)  # (B, C, 1, 1)
+        return x * y
+
+
+class LocalAGLKABranch(nn.Module):
+    """Attention-Guided Large Kernel Attention (AG-LKA) Branch.
+    
+    Replaces ConvMixer++ with a more powerful large-kernel attention mechanism.
+    
+    Architecture (following user pseudocode):
+        X1 = Norm(X)
+        
+        # Local stem
+        X2 = DWConv3x3(X1) → SiLU
+        
+        # Large-kernel spatial (multi-scale)
+        S = DWConv5x5(X2) + DWConv7x7_dilated(X2)
+        
+        # Spatial gate
+        g = Sigmoid(Linear(GAP(X2)))
+        S = S * g
+        
+        # Channel interaction (ECA++)
+        c = Sigmoid(Conv1D(GAP(S)))
+        F = S * c
+        
+        # Residual
+        Y = X + α·F
     
     Args:
         channels: Number of input/output channels
-        dilation: Dilation rate for mid-range conv (default: 2)
+        dilation: Dilation for 7x7 conv (default: 2)
     """
     
     def __init__(self, channels: int, dilation: int = 2):
         super().__init__()
         
-        # Local spatial modeling (k=3, standard)
-        self.local_dw = nn.Conv2d(
-            channels, channels, kernel_size=3, 
-            padding=1, groups=channels, bias=False
-        )
-        self.local_bn = nn.BatchNorm2d(channels)
+        self.channels = channels
         
-        # Mid-range spatial modeling (k=3, dilated)
-        self.mid_dw = nn.Conv2d(
-            channels, channels, kernel_size=3,
-            padding=dilation, dilation=dilation, groups=channels, bias=False
-        )
-        self.mid_bn = nn.BatchNorm2d(channels)
+        # Pre-normalization
+        self.norm = nn.LayerNorm(channels)
         
-        # Spatial gating
-        self.spatial_gate = SpatialGate(channels, kernel_size=3)
-        
-        # Channel mixing (pointwise) with BN + GELU
-        self.channel_mix = nn.Sequential(
-            nn.Conv2d(channels, channels, kernel_size=1, bias=False),
-            nn.BatchNorm2d(channels),
-            nn.GELU()
+        # Local stem: DWConv 3x3 + SiLU
+        self.local_stem = nn.Sequential(
+            nn.Conv2d(channels, channels, kernel_size=3, 
+                      padding=1, groups=channels, bias=False),
+            nn.SiLU(inplace=True)
         )
         
-        # Lightweight channel attention
-        self.se = SELite(channels, reduction=8)
+        # Large-kernel spatial: DWConv 5x5
+        self.lk_conv5 = nn.Conv2d(
+            channels, channels, kernel_size=5,
+            padding=2, groups=channels, bias=False
+        )
+        
+        # Large-kernel spatial: DWConv 7x7 dilated
+        # Effective RF: 7 + (7-1)*(dilation-1) = 7 + 6*(2-1) = 13 with dilation=2
+        self.lk_conv7_dilated = nn.Conv2d(
+            channels, channels, kernel_size=7,
+            padding=3 * dilation, dilation=dilation, 
+            groups=channels, bias=False
+        )
+        
+        # Spatial gate: Sigmoid(Linear(GAP))
+        self.spatial_gap = nn.AdaptiveAvgPool2d(1)
+        self.spatial_gate_fc = nn.Sequential(
+            nn.Linear(channels, channels, bias=False),
+            nn.Sigmoid()
+        )
+        
+        # Channel interaction: ECA++
+        self.eca = ECAPlus(channels)
+        
+        # Learnable residual scaling
+        self.alpha = nn.Parameter(torch.tensor(0.1))
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -128,27 +181,40 @@ class LocalMidBranch(nn.Module):
             x: (B, C, H, W) input features
             
         Returns:
-            F_local: (B, C, H, W) local-mid range features
+            (B, C, H, W) output features with AG-LKA
         """
-        # Local spatial: DWConv + BN + GELU
-        local = F.gelu(self.local_bn(self.local_dw(x)))
+        B, C, H, W = x.shape
         
-        # Mid-range spatial (dilated): DWConv + BN + GELU
-        mid = F.gelu(self.mid_bn(self.mid_dw(local)))
+        # === Pre-Normalization ===
+        # Need to reshape for LayerNorm: (B, C, H, W) -> (B, H, W, C)
+        x1 = x.permute(0, 2, 3, 1)  # (B, H, W, C)
+        x1 = self.norm(x1)
+        x1 = x1.permute(0, 3, 1, 2)  # (B, C, H, W)
         
-        # Combine local and mid features
-        combined = local + mid
+        # === Local Stem ===
+        x2 = self.local_stem(x1)  # DWConv3x3 + SiLU
         
-        # Spatial gating
-        gated = self.spatial_gate(combined)
+        # === Large-Kernel Spatial (Multi-scale) ===
+        s = self.lk_conv5(x2) + self.lk_conv7_dilated(x2)  # DWConv5x5 + DWConv7x7_d
         
-        # Channel mixing (1x1 Conv + BN + GELU)
-        mixed = self.channel_mix(gated)
+        # === Spatial Gate ===
+        # g = Sigmoid(Linear(GAP(X2)))
+        g = self.spatial_gap(x2).view(B, C)  # (B, C)
+        g = self.spatial_gate_fc(g).view(B, C, 1, 1)  # (B, C, 1, 1)
+        s = s * g  # Spatial gating
         
-        # Channel attention
-        out = self.se(mixed)
+        # === Channel Interaction (ECA++) ===
+        # c = Sigmoid(Conv1D(GAP(S)))
+        f = self.eca(s)
         
-        return out
+        # === Residual ===
+        y = x + self.alpha * f
+        
+        return y
+
+
+# Keep old name as alias for backward compatibility
+LocalMidBranch = LocalAGLKABranch
 
 
 # =============================================================================

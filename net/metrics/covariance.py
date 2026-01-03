@@ -10,85 +10,95 @@ from typing import List, Optional, Tuple
 
 
 class CovaBlock(nn.Module):
-    """Covariance-based similarity module.
+    """Covariance-based similarity module (Vectorized).
     
     Computes similarity based on covariance matrices of support features,
     capturing distribution-level information rather than just point estimates.
     
     Reference: CovaMNet (Li et al., AAAI 2019)
-    "Distribution Consistency Based Covariance Metric Networks for Few-Shot Learning"
     """
     
     def __init__(self):
         super(CovaBlock, self).__init__()
 
-    def cal_covariance(self, input_features: list) -> list:
-        """Calculate covariance matrices for each class.
-        
-        Args:
-            input_features: List of (B, C, h, w) feature tensors, one per class
-            
-        Returns:
-            List of (C, C) covariance matrices
+    def cal_covariance(self, support_features):
         """
-        CovaMatrix_list = []
-        for i in range(len(input_features)):
-            support_set_sam = input_features[i]
-            B, C, h, w = support_set_sam.size()
-
-            support_set_sam = support_set_sam.permute(1, 0, 2, 3)
-            support_set_sam = support_set_sam.contiguous().view(C, -1)
-            mean_support = torch.mean(support_set_sam, 1, True)
-            support_set_sam = support_set_sam - mean_support
-
-            covariance_matrix = support_set_sam @ torch.transpose(support_set_sam, 0, 1)
-            covariance_matrix = torch.div(covariance_matrix, h * w * B - 1)
-            CovaMatrix_list.append(covariance_matrix)
-        return CovaMatrix_list
-
-    def cal_similarity(self, query_features: torch.Tensor, CovaMatrix_list: list) -> torch.Tensor:
-        """Calculate similarity between query and class covariance matrices.
-        
         Args:
-            query_features: (B, C, h, w) query feature maps
-            CovaMatrix_list: List of (C, C) covariance matrices
-            
+            support_features: (K, Shot, C, h, w) or (B, K, Shot, C, h, w)
+            # Note: SMNet main.py currently passes (B, Way, Shot, C, H, W)
+            # But we might want to process by reshaping.
+            # Let's assume input is (Ns, C, h, w) where Ns is standard
+            # Actually, let's match the MixMamba input format: (K, Shot, C, h, w)
+        """
+        # We need to handle the input shape carefully.
+        # If input is list, stack it.
+        if isinstance(support_features, list):
+             support_features = torch.stack(support_features)
+             
+        if support_features.dim() == 6: # (B, K, Shot, C, H, W)
+             # Reshape to (B*K, Shot, C, H, W) or handle per batch
+             # For simplicity, let's assume we call this per episode or reshape outside.
+             # But this module is usually called inside forward.
+             pass
+        
+        # Implementation from MixMamba (optimized)
+        # Expected input: (K, Shot, C, h, w)
+        if support_features.dim() != 5:
+            # Try to handle (Way*Shot, C, H, W) -> (Way, Shot, ...)
+             raise ValueError(f"Expected 5D input (K, Shot, C, h, w), got {support_features.shape}")
+
+        K, Shot, C, h, w = support_features.size()
+        
+        # Reshape to (K, C, N) where N = Shot*h*w
+        support_flat = support_features.permute(0, 2, 1, 3, 4).contiguous().view(K, C, -1)
+        
+        # Mean centering
+        mean_support = torch.mean(support_flat, dim=2, keepdim=True)
+        support_centered = support_flat - mean_support
+        
+        # Compute covariance: (K, C, N) @ (K, N, C) -> (K, C, C)
+        covariance_matrix = torch.bmm(support_centered, support_centered.transpose(1, 2))
+        
+        # Normalize
+        covariance_matrix = torch.div(covariance_matrix, Shot * h * w - 1)
+        return covariance_matrix
+
+    def cal_similarity(self, query_features, covariance_matrices):
+        """
+        Args:
+            query_features: (B, C, h, w)
+            covariance_matrices: (K, C, C)
         Returns:
-            (B, num_classes * h * w) similarity scores
+            similarity: (B, K*h*w) flattened map
         """
         B, C, h, w = query_features.size()
-        Cova_Sim = []
-
-        for i in range(B):
-            query_sam = query_features[i]
-            query_sam = query_sam.view(C, -1)
-            query_sam_norm = torch.norm(query_sam, 2, 1, True)
-            query_sam = query_sam / query_sam_norm
-
-            mea_sim = torch.zeros(1, len(CovaMatrix_list) * h * w).to(query_sam.device)
-
-            for j in range(len(CovaMatrix_list)):
-                temp_dis = torch.transpose(query_sam, 0, 1) @ CovaMatrix_list[j] @ query_sam
-                mea_sim[0, j * h * w:(j + 1) * h * w] = temp_dis.diag()
-
-            Cova_Sim.append(mea_sim.view(1, -1))
-
-        Cova_Sim = torch.cat(Cova_Sim, 0)
-        return Cova_Sim
-
-    def forward(self, query_features: torch.Tensor, support_features: list) -> torch.Tensor:
-        """Compute covariance-based similarity.
+        K = covariance_matrices.size(0)
         
-        Args:
-            query_features: (B, C, h, w) query feature maps
-            support_features: List of (B, C, h, w) support features per class
-            
-        Returns:
-            (B, num_classes * h * w) similarity scores
+        # Reshape query: (B, C, L) where L = h*w
+        query_flat = query_features.view(B, C, -1)
+        
+        # Normalize query (B, C, L)
+        query_norm = torch.norm(query_flat, p=2, dim=1, keepdim=True) # (B, 1, L)
+        query_normalized = query_flat / (query_norm + 1e-8)
+        
+        # Compute Mahalanobis-like distance: q.T @ M @ q
+        # output (B, K, L)
+        similarity_map = torch.einsum('bcl, kcd, bdl -> bkl', query_normalized, covariance_matrices, query_normalized)
+        
+        # Flatten to (B, K*h*w)
+        similarity_flat = similarity_map.reshape(B, -1)
+        
+        return similarity_flat
+
+    def forward(self, query_features, support_features):
         """
-        CovaMatrix_list = self.cal_covariance(support_features)
-        Cova_Sim = self.cal_similarity(query_features, CovaMatrix_list)
-        return Cova_Sim
+        Args:
+            query_features: (B, C, h, w)
+            support_features: (K, Shot, C, h, w)
+        """
+        covariance_matrices = self.cal_covariance(support_features)
+        similarity = self.cal_similarity(query_features, covariance_matrices)
+        return similarity
 
 
 class SlotCovarianceBlock(nn.Module):

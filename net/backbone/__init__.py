@@ -6,7 +6,7 @@ Provides all components for the SMNet feature extractor.
 from .convmixer import ConvMixerBlock, ConvMixerEncoder
 from .channel_attention import ChannelAttention
 from .pixel_mamba import SS2D, PixelMamba  # SS2D = 4-way scanning with shared weights
-from .slot_attention import SlotAttention, SlotAttentionMamba
+from .slot_attention import SlotAttention  # Mamba-based Slot Attention
 from .slot_mamba import SlotMamba
 from .dual_branch_fusion import DualBranchFusion, LocalMidBranch, GlobalSS2DBranch
 from .feature_extractor import SlotFeatureExtractor, PatchEmbed2D, PatchMerging2D, SpatialDownsample
@@ -26,8 +26,7 @@ __all__ = [
     'DualBranchFusion',
     'LocalMidBranch',
     'GlobalSS2DBranch',
-    'SlotAttention',
-    'SlotAttentionMamba',  # Mamba-based Slot Attention
+    'SlotAttention',  # Mamba-based
     'SlotMamba',
     'SlotFeatureExtractor',
     # Class-Aware Inference
