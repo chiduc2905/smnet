@@ -21,7 +21,7 @@ SHOTS = [1, 5, 10]
 SAMPLES_LIST = [80, 800, 1600, 6000]
 
 # Model variants
-MODELS = ['smnet', 'smnet_light']
+MODELS = ['smnet']
 
 
 def run_experiment(model, shot, samples, dataset_path, dataset_name, project):

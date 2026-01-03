@@ -35,8 +35,8 @@ class SMNet(nn.Module):
     
     def __init__(
         self,
-        in_channels: int = 3,
-        hidden_dim: int = 96,
+        in_channels: int = 1,
+        hidden_dim: int = 64,
         num_slots: int = 4,
         learnable_slots: bool = True,
         regularization: float = 1e-3,
@@ -58,7 +58,7 @@ class SMNet(nn.Module):
             convmixer_kernel=9,
             patch_size=4,
             slot_iters=3,
-            slot_mamba_layers=2
+            slot_mamba_layers=1
         )
         
         # Slot Covariance Similarity
@@ -129,66 +129,3 @@ class SMNet(nn.Module):
         """
         return self.encoder(images)
 
-
-class SMNetLight(nn.Module):
-    """SMNet Lightweight version with fewer parameters.
-    
-    Reduces:
-    - ConvMixer depth: 4 -> 2
-    - Slot Mamba layers: 2 -> 1
-    - Hidden dim: 256 -> 128
-    """
-    
-    def __init__(
-        self,
-        in_channels: int = 3,
-        hidden_dim: int = 128,
-        num_slots: int = 4,
-        device: str = 'cuda'
-    ):
-        super().__init__()
-        
-        self.encoder = SlotFeatureExtractor(
-            in_channels=in_channels,
-            hidden_dim=hidden_dim,
-            num_slots=num_slots,
-            learnable_slots=True,
-            convmixer_depth=2,
-            convmixer_kernel=7,
-            patch_size=4,
-            slot_iters=2,
-            slot_mamba_layers=1
-        )
-        
-        self.similarity = SlotCovarianceBlock(
-            regularization=1e-3,
-            use_mahalanobis=True,
-            normalize_slots=True
-        )
-        
-        self.to(device)
-    
-    def forward(self, query: torch.Tensor, support: torch.Tensor) -> torch.Tensor:
-        """Same as SlotCovarianceNet.forward()"""
-        B, NQ, C, H, W = query.shape
-        B_s, Way, Shot, C_s, H_s, W_s = support.shape
-        
-        scores_list = []
-        
-        for b in range(B):
-            q_b = query[b]
-            q_slots, q_weights = self.encoder(q_b)
-            
-            support_slots = []
-            support_weights = []
-            
-            for w in range(Way):
-                s_class = support[b, w]
-                s_slots, s_weights = self.encoder(s_class)
-                support_slots.append(s_slots)
-                support_weights.append(s_weights)
-            
-            scores = self.similarity(q_slots, support_slots, q_weights, support_weights)
-            scores_list.append(scores)
-        
-        return torch.cat(scores_list, dim=0)

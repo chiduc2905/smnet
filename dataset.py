@@ -112,15 +112,15 @@ class PDScalogramPreSplit:
         pixels = []
         
         for fpath, _ in self.train_files:
-            img = Image.open(fpath).convert('RGB')
+            img = Image.open(fpath).convert('L')  # Grayscale
             pixels.append(self._base_transform(img).numpy())
         
         if not pixels:
             print("Warning: No training data found for stats computation. Using default mean/std.")
-            self.mean = [0.5, 0.5, 0.5]
-            self.std = [0.5, 0.5, 0.5]
+            self.mean = [0.5]
+            self.std = [0.5]
         else:
-            all_imgs = np.stack(pixels)  # (N, 3, H, W)
+            all_imgs = np.stack(pixels)  # (N, 1, H, W)
             self.mean = all_imgs.mean(axis=(0, 2, 3)).tolist()
             self.std = all_imgs.std(axis=(0, 2, 3)).tolist()
         
@@ -138,19 +138,19 @@ class PDScalogramPreSplit:
         """Load images using the pre-computed splits and normalization."""
         # Load Train
         for fpath, label in self.train_files:
-            img = Image.open(fpath).convert('RGB')
+            img = Image.open(fpath).convert('L')  # Grayscale
             self.X_train.append(self.transform(img).numpy())
             self.y_train.append(label)
             
         # Load Val
         for fpath, label in self.val_files:
-            img = Image.open(fpath).convert('RGB')
+            img = Image.open(fpath).convert('L')
             self.X_val.append(self.transform(img).numpy())
             self.y_val.append(label)
             
         # Load Test
         for fpath, label in self.test_files:
-            img = Image.open(fpath).convert('RGB')
+            img = Image.open(fpath).convert('L')
             self.X_test.append(self.transform(img).numpy())
             self.y_test.append(label)
         
@@ -345,19 +345,19 @@ class PDScalogram:
         """Load images using the pre-computed splits and normalization."""
         # Load Train
         for fpath, label in self.train_files:
-            img = Image.open(fpath).convert('RGB')
+            img = Image.open(fpath).convert('L')
             self.X_train.append(self.transform(img).numpy())
             self.y_train.append(label)
             
         # Load Val
         for fpath, label in self.val_files:
-            img = Image.open(fpath).convert('RGB')
+            img = Image.open(fpath).convert('L')
             self.X_val.append(self.transform(img).numpy())
             self.y_val.append(label)
             
         # Load Test
         for fpath, label in self.test_files:
-            img = Image.open(fpath).convert('RGB')
+            img = Image.open(fpath).convert('L')
             self.X_test.append(self.transform(img).numpy())
             self.y_test.append(label)
         

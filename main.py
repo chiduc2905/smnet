@@ -36,7 +36,7 @@ from function.function import (
 )
 
 # Model
-from net.slot_fewshot import SMNet, SMNetLight
+from net.slot_fewshot import SMNet
 
 
 # =============================================================================
@@ -57,8 +57,8 @@ def get_args():
     
     # Model
     parser.add_argument('--model', type=str, default='smnet', 
-                        choices=['smnet', 'smnet_light'])
-    parser.add_argument('--hidden_dim', type=int, default=96,
+                        choices=['smnet'])
+    parser.add_argument('--hidden_dim', type=int, default=64,
                         help='Hidden dimension for feature extractor')
     parser.add_argument('--num_slots', type=int, default=4,
                         help='Number of semantic slots K')
@@ -102,22 +102,14 @@ def get_model(args):
     """Initialize model based on args."""
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
-    if args.model == 'smnet_light':
-        model = SMNetLight(
-            in_channels=3,
-            hidden_dim=args.hidden_dim // 2,  # Light uses half dim
-            num_slots=args.num_slots,
-            device=str(device)
-        )
-    else:  # smnet
-        model = SMNet(
-            in_channels=3,
-            hidden_dim=args.hidden_dim,
-            num_slots=args.num_slots,
-            learnable_slots=True,
-            regularization=1e-3,
-            device=str(device)
-        )
+    model = SMNet(
+        in_channels=1,  # Grayscale input
+        hidden_dim=args.hidden_dim,
+        num_slots=args.num_slots,
+        learnable_slots=True,
+        regularization=1e-3,
+        device=str(device)
+    )
     
     return model.to(device)
 
