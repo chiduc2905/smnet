@@ -24,7 +24,7 @@ except ImportError:
 class SS2D(nn.Module):
     """Selective Scan 2D - Global spatial modeling via 4-way Mamba scanning.
     
-    Uses SHARED weights across all 4 directions for parameter efficiency.
+    Uses 4 separate Mamba modules for each scanning direction (row, row-rev, col, col-rev).
     
     4 Scanning directions:
         1. Row-major (left to right)
@@ -64,13 +64,16 @@ class SS2D(nn.Module):
         self.norm = nn.LayerNorm(d_model)
         self.in_proj = nn.Linear(d_model, self.d_inner * 2, bias=False)
         
-        # SINGLE Mamba for all 4 directions (shared weights)
-        self.mamba = Mamba(
-            d_model=self.d_inner,
-            d_state=d_state,
-            d_conv=d_conv,
-            expand=1  # Already expanded by in_proj
-        )
+        # 4 SEPARATE Mamba modules for 4 directions (Original SS2D design)
+        # This increases parameters but allows learning direction-specific features
+        self.mambas = nn.ModuleList([
+            Mamba(
+                d_model=self.d_inner,
+                d_state=d_state,
+                d_conv=d_conv,
+                expand=1  # Already expanded by in_proj
+            ) for _ in range(4)
+        ])
         
         # Output projection
         self.out_proj = nn.Linear(self.d_inner, d_model, bias=False)
@@ -103,7 +106,7 @@ class SS2D(nn.Module):
         
         # Create 4 scanning directions
         # 1. Row-major: keep as is
-        x_row = x_proj  # (B, L, d_inner)
+        x_row = x_proj
         
         # 2. Row-major reversed
         x_row_rev = torch.flip(x_proj, dims=[1])
@@ -115,14 +118,11 @@ class SS2D(nn.Module):
         # 4. Column-major reversed
         x_col_rev = torch.flip(x_col, dims=[1])
         
-        # Stack all 4 directions: (B*4, L, d_inner)
-        x_4way = torch.cat([x_row, x_row_rev, x_col, x_col_rev], dim=0)
-        
-        # Apply SINGLE Mamba to all directions (shared weights)
-        y_4way = self.mamba(x_4way)  # (B*4, L, d_inner)
-        
-        # Split back to 4 directions
-        y_row, y_row_rev, y_col, y_col_rev = y_4way.chunk(4, dim=0)
+        # Apply SEPARATE Mamba to each direction
+        y_row = self.mambas[0](x_row)
+        y_row_rev = self.mambas[1](x_row_rev)
+        y_col = self.mambas[2](x_col)
+        y_col_rev = self.mambas[3](x_col_rev)
         
         # Reverse the reversed directions back
         y_row_rev = torch.flip(y_row_rev, dims=[1])
