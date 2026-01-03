@@ -36,15 +36,18 @@ class SMNet(nn.Module):
         1. Shared SlotFeatureExtractor for support and query
         2. ClassAwareInferenceHead for slot-based classification
     
+    Hyperparameters follow SAFF paper (arXiv:2508.09699) recommendations.
+    
     Args:
         in_channels: Input image channels (default: 1 for grayscale)
         base_dim: Base embedding dimension (default: 32, doubles each merge stage)
         hidden_dim: Final hidden dimension for slots (default: 64)
-        num_slots: Number of semantic slots K (default: 4)
+        num_slots: Number of semantic slots K (default: 5, SAFF paper optimal)
+        slot_iters: Number of slot attention iterations (default: 5, SAFF paper optimal)
         num_merging_stages: Number of PatchMerging2D stages (default: 3)
         learnable_slots: Whether slot count is learnable (default: True)
-        temperature: Temperature for similarity scaling (default: 0.1)
-        lambda_init: Initial value for residual scaling λ (default: 0.5)
+        temperature: Temperature for similarity scaling (default: 1.0)
+        lambda_init: Initial value for residual scaling λ (default: 2.0, SAFF paper)
         device: Device to use
     """
     
@@ -53,12 +56,13 @@ class SMNet(nn.Module):
         in_channels: int = 1,
         base_dim: int = 32,
         hidden_dim: int = 64,
-        num_slots: int = 4,
+        num_slots: int = 5,  # SAFF paper: 5 slots optimal
+        slot_iters: int = 5,  # SAFF paper: 5 iterations optimal
         num_merging_stages: int = 3,
         learnable_slots: bool = True,
         regularization: float = 1e-3,  # kept for backward compatibility
-        temperature: float = 0.1,
-        lambda_init: float = 0.5,
+        temperature: float = 1.0,  # Higher for better gradients
+        lambda_init: float = 2.0,  # SAFF paper: lambda=2.0
         device: str = 'cuda'
     ):
         super().__init__()
@@ -79,7 +83,7 @@ class SMNet(nn.Module):
             num_merging_stages=num_merging_stages,
             dual_branch_dilation=2,
             d_state=16,
-            slot_iters=3,
+            slot_iters=slot_iters,  # Now configurable, SAFF paper: 5
             slot_mamba_layers=1
         )
         

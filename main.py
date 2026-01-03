@@ -60,8 +60,12 @@ def get_args():
                         choices=['smnet'])
     parser.add_argument('--hidden_dim', type=int, default=64,
                         help='Hidden dimension for feature extractor')
-    parser.add_argument('--num_slots', type=int, default=4,
-                        help='Number of semantic slots K')
+    parser.add_argument('--num_slots', type=int, default=5,
+                        help='Number of semantic slots K (paper: 5)')
+    parser.add_argument('--slot_iters', type=int, default=5,
+                        help='Slot attention iterations (paper: 5)')
+    parser.add_argument('--lambda_init', type=float, default=2.0,
+                        help='Lambda for class-aware refinement (paper: 2.0)')
     
     # Few-shot settings
     parser.add_argument('--way_num', type=int, default=4)
@@ -79,9 +83,13 @@ def get_args():
     parser.add_argument('--episode_num_test', type=int, default=300)
     parser.add_argument('--num_epochs', type=int, default=100)
     parser.add_argument('--batch_size', type=int, default=1)
-    parser.add_argument('--lr', type=float, default=1e-4)
-    parser.add_argument('--step_size', type=int, default=10)
-    parser.add_argument('--gamma', type=float, default=0.1)
+    parser.add_argument('--lr', type=float, default=5e-4)
+    parser.add_argument('--min_lr', type=float, default=1e-6)
+    parser.add_argument('--warmup_epochs', type=int, default=5)
+    parser.add_argument('--temperature', type=float, default=1.0,
+                        help='Temperature for similarity scaling (higher=softer)')
+    parser.add_argument('--grad_clip', type=float, default=1.0,
+                        help='Gradient clipping max norm')
     parser.add_argument('--seed', type=int, default=42)
     
     # Loss
@@ -106,8 +114,11 @@ def get_model(args):
         in_channels=1,  # Grayscale input
         hidden_dim=args.hidden_dim,
         num_slots=args.num_slots,
+        slot_iters=args.slot_iters,  # SAFF paper: 5 iterations
         learnable_slots=True,
         regularization=1e-3,
+        temperature=args.temperature,
+        lambda_init=args.lambda_init,  # SAFF paper: lambda=2.0
         device=str(device)
     )
     
@@ -139,7 +150,15 @@ def train_loop(net, train_loader, val_X, val_y, args):
         {'params': criterion_center.parameters()}
     ], lr=args.lr)
     
-    scheduler = lr_scheduler.StepLR(optimizer, step_size=args.step_size, gamma=args.gamma)
+    # Cosine annealing with warmup
+    def lr_lambda(epoch):
+        if epoch < args.warmup_epochs:
+            return epoch / args.warmup_epochs
+        else:
+            progress = (epoch - args.warmup_epochs) / (args.num_epochs - args.warmup_epochs)
+            return args.min_lr / args.lr + (1 - args.min_lr / args.lr) * 0.5 * (1 + np.cos(np.pi * progress))
+    
+    scheduler = lr_scheduler.LambdaLR(optimizer, lr_lambda)
     
     # Training history
     history = {
@@ -184,6 +203,11 @@ def train_loop(net, train_loader, val_X, val_y, args):
                 loss = loss_main
             
             loss.backward()
+            
+            # Gradient clipping
+            if args.grad_clip > 0:
+                torch.nn.utils.clip_grad_norm_(net.parameters(), args.grad_clip)
+            
             optimizer.step()
             
             total_loss += loss.item()
@@ -335,7 +359,7 @@ def test_final(net, loader, args):
             
             # Extract features for t-SNE
             q_flat = query.view(-1, C, H, W)
-            slots, _ = net.encoder(q_flat)
+            slots, _, _, _ = net.encoder(q_flat)
             feat = slots.view(slots.size(0), -1)
             all_features.append(feat.cpu().numpy())
     
