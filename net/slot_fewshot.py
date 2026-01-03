@@ -1,14 +1,24 @@
 """SMNet (Slot Mamba Network) for few-shot learning.
 
-Architecture v3:
+Architecture v4 (224×224 input):
 - PatchEmbed2D: Overlapping patch embedding (stride=1)
-- SpatialDownsample: Reduce spatial size for efficiency
+- PatchMerging2D: Swin-style hierarchical patch merging (224→112→56→28)
 - DualBranchFusion: Parallel local-global with anchor-guided fusion
   - Local Branch: ConvMixer++ (DW, Dilated DW, SE-Lite)
   - Global Branch: SS2D (4-way Mamba)
 - Slot Attention: Semantic grouping into K slots
 - Slot Mamba: Inter-slot reasoning
 - Slot Covariance: Similarity computation
+
+Pipeline:
+    Input:       (B, 1, 224, 224)
+    PatchEmbed:  (B, 32, 224, 224)
+    Merge1:      (B, 64, 112, 112)
+    Merge2:      (B, 128, 56, 56)
+    Merge3:      (B, 256, 28, 28)
+    Proj:        (B, 64, 28, 28)
+    DualBranch:  (B, 64, 28, 28)
+    Slots:       (B, K, 64)
 """
 import torch
 import torch.nn as nn
@@ -27,9 +37,11 @@ class SMNet(nn.Module):
         2. SlotCovarianceBlock for metric-based classification
     
     Args:
-        in_channels: Input image channels (default: 1)
-        hidden_dim: Hidden dimension (default: 64)
+        in_channels: Input image channels (default: 1 for grayscale)
+        base_dim: Base embedding dimension (default: 32, doubles each merge stage)
+        hidden_dim: Final hidden dimension for slots (default: 64)
         num_slots: Number of semantic slots K (default: 4)
+        num_merging_stages: Number of PatchMerging2D stages (default: 3)
         learnable_slots: Whether slot count is learnable (default: True)
         regularization: Covariance regularization (default: 1e-3)
         device: Device to use
@@ -38,29 +50,33 @@ class SMNet(nn.Module):
     def __init__(
         self,
         in_channels: int = 1,
+        base_dim: int = 32,
         hidden_dim: int = 64,
         num_slots: int = 4,
+        num_merging_stages: int = 3,
         learnable_slots: bool = True,
         regularization: float = 1e-3,
         device: str = 'cuda'
     ):
         super().__init__()
         
+        self.base_dim = base_dim
         self.hidden_dim = hidden_dim
         self.num_slots = num_slots
         self.device = device
         
-        # Shared Feature Extractor (v3 pipeline)
+        # Shared Feature Extractor (v4 pipeline - 224×224 input)
         self.encoder = SlotFeatureExtractor(
             in_channels=in_channels,
+            base_dim=base_dim,
             hidden_dim=hidden_dim,
             num_slots=num_slots,
             learnable_slots=learnable_slots,
-            # New v3 parameters
-            patch_kernel=3,           # PatchEmbed2D kernel size
-            downsample_factor=4,      # 64×64 → 16×16
-            dual_branch_dilation=2,   # Local branch dilation
-            d_state=16,               # Mamba state dimension
+            # v4 PatchMerging parameters
+            patch_kernel=3,              # PatchEmbed2D kernel size
+            num_merging_stages=num_merging_stages,  # 224→112→56→28
+            dual_branch_dilation=2,      # Local branch dilation
+            d_state=16,                  # Mamba state dimension
             slot_iters=3,
             slot_mamba_layers=1
         )
