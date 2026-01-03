@@ -127,7 +127,7 @@ def train_loop(net, train_loader, val_X, val_y, args):
     
     # Calculate feature dimension dynamically
     with torch.no_grad():
-        dummy_input = torch.randn(1, 3, args.image_size, args.image_size).to(device)
+        dummy_input = torch.randn(1, 1, args.image_size, args.image_size).to(device)
         dummy_slots, _ = net.encoder(dummy_input)
         feat_dim = dummy_slots.view(1, -1).size(1)
         
