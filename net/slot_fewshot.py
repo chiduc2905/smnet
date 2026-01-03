@@ -1,12 +1,14 @@
 """SMNet (Slot Mamba Network) for few-shot learning.
 
-Integrates:
-- ConvMixer for local spatial extraction
-- SS2D (4-way Mamba) for global spatial context
-- Channel Attention for local channel interaction
-- Slot Attention for semantic grouping (learnable K slots)
-- Slot Mamba for inter-slot reasoning
-- Slot Covariance for similarity computation
+Architecture v3:
+- PatchEmbed2D: Overlapping patch embedding (stride=1)
+- SpatialDownsample: Reduce spatial size for efficiency
+- DualBranchFusion: Parallel local-global with anchor-guided fusion
+  - Local Branch: ConvMixer++ (DW, Dilated DW, SE-Lite)
+  - Global Branch: SS2D (4-way Mamba)
+- Slot Attention: Semantic grouping into K slots
+- Slot Mamba: Inter-slot reasoning
+- Slot Covariance: Similarity computation
 """
 import torch
 import torch.nn as nn
@@ -25,8 +27,8 @@ class SMNet(nn.Module):
         2. SlotCovarianceBlock for metric-based classification
     
     Args:
-        in_channels: Input image channels (default: 3)
-        hidden_dim: Hidden dimension (default: 256)
+        in_channels: Input image channels (default: 1)
+        hidden_dim: Hidden dimension (default: 64)
         num_slots: Number of semantic slots K (default: 4)
         learnable_slots: Whether slot count is learnable (default: True)
         regularization: Covariance regularization (default: 1e-3)
@@ -48,15 +50,17 @@ class SMNet(nn.Module):
         self.num_slots = num_slots
         self.device = device
         
-        # Shared Feature Extractor
+        # Shared Feature Extractor (v3 pipeline)
         self.encoder = SlotFeatureExtractor(
             in_channels=in_channels,
             hidden_dim=hidden_dim,
             num_slots=num_slots,
             learnable_slots=learnable_slots,
-            convmixer_depth=4,
-            convmixer_kernel=9,
-            patch_size=4,
+            # New v3 parameters
+            patch_kernel=3,           # PatchEmbed2D kernel size
+            downsample_factor=4,      # 64×64 → 16×16
+            dual_branch_dilation=2,   # Local branch dilation
+            d_state=16,               # Mamba state dimension
             slot_iters=3,
             slot_mamba_layers=1
         )

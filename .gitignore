@@ -5,6 +5,9 @@
 # Documentation (LaTeX/temp files)
 docs/
 
+# Nested git repositories
+few_shot_mamba/
+
 # Data folders (scalogram images)
 scalogram/
 scalogram_*/
