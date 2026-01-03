@@ -81,12 +81,11 @@ class LocalMidBranch(nn.Module):
     Focuses on local and mid-range spatial interactions without global attention.
     
     Components:
-        1. Depthwise Conv (k=3) for local spatial modeling
-        2. Dilated Depthwise Conv (k=3, d=2) for mid-range spatial interaction
+        1. Depthwise Conv (k=3) + BN + GELU for local spatial modeling
+        2. Dilated Depthwise Conv (k=3, d=2) + BN + GELU for mid-range spatial
         3. Lightweight spatial gating (sigmoid-activated DW conv)
-        4. Pointwise (1×1) conv for channel mixing
+        4. Pointwise (1×1) conv + BN + GELU for channel mixing
         5. SE-Lite for channel interaction
-        6. SiLU activations throughout
     
     Args:
         channels: Number of input/output channels
@@ -113,11 +112,11 @@ class LocalMidBranch(nn.Module):
         # Spatial gating
         self.spatial_gate = SpatialGate(channels, kernel_size=3)
         
-        # Channel mixing (pointwise)
+        # Channel mixing (pointwise) with BN + GELU
         self.channel_mix = nn.Sequential(
             nn.Conv2d(channels, channels, kernel_size=1, bias=False),
             nn.BatchNorm2d(channels),
-            nn.SiLU(inplace=True)
+            nn.GELU()
         )
         
         # Lightweight channel attention
@@ -131,11 +130,11 @@ class LocalMidBranch(nn.Module):
         Returns:
             F_local: (B, C, H, W) local-mid range features
         """
-        # Local spatial
-        local = F.silu(self.local_bn(self.local_dw(x)))
+        # Local spatial: DWConv + BN + GELU
+        local = F.gelu(self.local_bn(self.local_dw(x)))
         
-        # Mid-range spatial (dilated)
-        mid = F.silu(self.mid_bn(self.mid_dw(local)))
+        # Mid-range spatial (dilated): DWConv + BN + GELU
+        mid = F.gelu(self.mid_bn(self.mid_dw(local)))
         
         # Combine local and mid features
         combined = local + mid
@@ -143,7 +142,7 @@ class LocalMidBranch(nn.Module):
         # Spatial gating
         gated = self.spatial_gate(combined)
         
-        # Channel mixing
+        # Channel mixing (1x1 Conv + BN + GELU)
         mixed = self.channel_mix(gated)
         
         # Channel attention
@@ -196,7 +195,7 @@ class VSSBlock(nn.Module):
     
     Args:
         d_model: Model dimension (channels)
-        d_state: SSM state dimension (default: 16)
+        d_state: SSM state dimension (default: 4)
         d_conv: Local convolution width in Mamba (default: 4)
         expand: Expansion factor for SS2D inner dimension (default: 2)
         ffn_expand: FFN expansion factor (default: 4)
@@ -206,7 +205,7 @@ class VSSBlock(nn.Module):
     def __init__(
         self,
         d_model: int,
-        d_state: int = 16,
+        d_state: int = 4,
         d_conv: int = 4,
         expand: int = 2,
         ffn_expand: int = 4,
@@ -256,13 +255,13 @@ class VSSBlock(nn.Module):
         self.out_proj = nn.Linear(self.d_inner, d_model, bias=False)
         
         # =============================================
-        # FFN Block
+        # Lightweight FFN Block: C → C → C (no expansion)
         # =============================================
         self.norm2 = nn.LayerNorm(d_model)
         self.ffn = nn.Sequential(
-            nn.Linear(d_model, self.ffn_hidden, bias=False),
-            nn.SiLU(inplace=True),
-            nn.Linear(self.ffn_hidden, d_model, bias=False)
+            nn.Linear(d_model, d_model, bias=False),
+            nn.GELU(),
+            nn.Linear(d_model, d_model, bias=False)
         )
     
     def _ss2d_forward(self, x: torch.Tensor, H: int, W: int) -> torch.Tensor:
