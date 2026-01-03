@@ -153,30 +153,54 @@ class LocalMidBranch(nn.Module):
 
 
 # =============================================================================
-# Branch 2: Global Pixel-Level Branch (SS2D Branch)
+# Branch 2: Vision State Space (VSS) Block
 # =============================================================================
 
-class GlobalSS2DBranch(nn.Module):
-    """Global Pixel-Level Branch using SS2D (4-way Mamba scanning).
+class VSSBlock(nn.Module):
+    """Vision State Space (VSS) Block for global feature extraction.
     
-    Captures long-range dependencies through 4 independent directional scans.
+    Standard VSS Block architecture from vision Mamba papers:
     
-    Components:
-        1. 1×1 conv projection with normalization before SS2D
-        2. Four INDEPENDENT SS2D scans (no weight sharing):
-           - Left-to-right (row-major)
-           - Right-to-left (row-major reversed)
-           - Top-to-bottom (column-major)
-           - Bottom-to-top (column-major reversed)
-        3. Gated fusion of directional outputs
-        4. Skip connection to prevent over-smoothing
-        5. No non-linear activation after SS2D
+        Input X
+            ↓
+        ┌─────────────────────────────────────────────┐
+        │ Pre-Normalization: X1 = LN(X)               │
+        └─────────────────────────────────────────────┘
+            ↓
+        ┌─────────────────────────────────────────────┐
+        │ SS2D Block:                                 │
+        │   Linear (1×1 conv) → DWConv(k=3) → SiLU   │
+        │   → SS2D (4-way scan) → LN → Linear (1×1)   │
+        └─────────────────────────────────────────────┘
+            ↓
+        ┌─────────────────────────────────────────────┐
+        │ First Residual: X2 = X + SS2D_Block(X1)     │
+        └─────────────────────────────────────────────┘
+            ↓
+        ┌─────────────────────────────────────────────┐
+        │ FFN: LN → Linear → SiLU → Linear            │
+        └─────────────────────────────────────────────┘
+            ↓
+        ┌─────────────────────────────────────────────┐
+        │ Second Residual: Y = X2 + FFN(LN(X2))       │
+        └─────────────────────────────────────────────┘
+            ↓
+        Output Y
+    
+    Key Design:
+        - NO gating branch (pure sequential)
+        - Two residual connections (after SS2D, after FFN)
+        - LayerNorm throughout (not BatchNorm)
+        - Linear residual paths (no activation on residual)
+        - 4-way SS2D with independent Mamba modules (no weight sharing)
     
     Args:
         d_model: Model dimension (channels)
         d_state: SSM state dimension (default: 16)
         d_conv: Local convolution width in Mamba (default: 4)
-        expand: Expansion factor (default: 1)
+        expand: Expansion factor for SS2D inner dimension (default: 2)
+        ffn_expand: FFN expansion factor (default: 4)
+        dw_kernel: Depthwise conv kernel size (default: 3)
     """
     
     def __init__(
@@ -184,21 +208,40 @@ class GlobalSS2DBranch(nn.Module):
         d_model: int,
         d_state: int = 16,
         d_conv: int = 4,
-        expand: int = 1
+        expand: int = 2,
+        ffn_expand: int = 4,
+        dw_kernel: int = 3
     ):
         super().__init__()
         
         self.d_model = d_model
         self.d_inner = int(expand * d_model)
+        self.ffn_hidden = int(ffn_expand * d_model)
         
         if not MAMBA_AVAILABLE:
             raise ImportError(
                 "mamba-ssm package is required. Install with: pip install mamba-ssm"
             )
         
-        # Pre-SS2D projection with normalization
-        self.pre_norm = nn.LayerNorm(d_model)
+        # =============================================
+        # Pre-Normalization
+        # =============================================
+        self.norm1 = nn.LayerNorm(d_model)
+        
+        # =============================================
+        # SS2D Block
+        # =============================================
+        # Linear (1×1 conv equivalent)
         self.in_proj = nn.Linear(d_model, self.d_inner, bias=False)
+        
+        # Depthwise Conv (k=3)
+        self.dw_conv = nn.Conv2d(
+            self.d_inner, self.d_inner,
+            kernel_size=dw_kernel,
+            padding=dw_kernel // 2,
+            groups=self.d_inner,
+            bias=False
+        )
         
         # 4 INDEPENDENT Mamba modules (no weight sharing)
         self.mamba_lr = Mamba(d_model=self.d_inner, d_state=d_state, d_conv=d_conv, expand=1)
@@ -206,14 +249,57 @@ class GlobalSS2DBranch(nn.Module):
         self.mamba_tb = Mamba(d_model=self.d_inner, d_state=d_state, d_conv=d_conv, expand=1)
         self.mamba_bt = Mamba(d_model=self.d_inner, d_state=d_state, d_conv=d_conv, expand=1)
         
-        # Fusion gate (learnable weighted combination)
-        self.fusion_gate = nn.Parameter(torch.ones(4) / 4)
+        # Post-SS2D LayerNorm
+        self.norm_ss2d = nn.LayerNorm(self.d_inner)
         
-        # Output projection (no activation after)
+        # Output Linear (1×1 conv equivalent)
         self.out_proj = nn.Linear(self.d_inner, d_model, bias=False)
         
-        # Skip gate to prevent over-smoothing
-        self.skip_gate = nn.Parameter(torch.tensor(0.5))
+        # =============================================
+        # FFN Block
+        # =============================================
+        self.norm2 = nn.LayerNorm(d_model)
+        self.ffn = nn.Sequential(
+            nn.Linear(d_model, self.ffn_hidden, bias=False),
+            nn.SiLU(inplace=True),
+            nn.Linear(self.ffn_hidden, d_model, bias=False)
+        )
+    
+    def _ss2d_forward(self, x: torch.Tensor, H: int, W: int) -> torch.Tensor:
+        """Apply 4-way SS2D scanning (no weight sharing).
+        
+        Args:
+            x: (B, L, d_inner) input sequence
+            H, W: spatial dimensions
+            
+        Returns:
+            (B, L, d_inner) output after averaged 4-way scanning
+        """
+        B, L, D = x.shape
+        
+        # 1. Left-to-Right (row-major)
+        y_lr = self.mamba_lr(x)
+        
+        # 2. Right-to-Left (row-major reversed)
+        x_rl = torch.flip(x, dims=[1])
+        y_rl = self.mamba_rl(x_rl)
+        y_rl = torch.flip(y_rl, dims=[1])
+        
+        # 3. Top-to-Bottom (column-major)
+        x_tb = x.view(B, H, W, D).permute(0, 2, 1, 3).contiguous().view(B, L, D)
+        y_tb = self.mamba_tb(x_tb)
+        y_tb = y_tb.view(B, W, H, D).permute(0, 2, 1, 3).contiguous().view(B, L, D)
+        
+        # 4. Bottom-to-Top (column-major reversed)
+        x_bt = torch.flip(x_tb, dims=[1])
+        y_bt = self.mamba_bt(x_bt)
+        y_bt = torch.flip(y_bt, dims=[1])
+        y_bt = y_bt.view(B, W, H, D).permute(0, 2, 1, 3).contiguous().view(B, L, D)
+        
+        # Average fusion (standard in VSS)
+        y_fused = (y_lr + y_rl + y_tb + y_bt) / 4.0
+        
+        return y_fused
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -221,56 +307,63 @@ class GlobalSS2DBranch(nn.Module):
             x: (B, C, H, W) input features
             
         Returns:
-            F_global: (B, C, H, W) global context features
+            y: (B, C, H, W) output features (same resolution)
         """
         B, C, H, W = x.shape
         L = H * W
         
-        # Flatten: (B, C, H, W) -> (B, L, C)
-        x_seq = rearrange(x, 'b c h w -> b (h w) c')
+        # Flatten: (B, C, H, W) -> (B, H, W, C) -> (B, L, C)
+        x_flat = x.permute(0, 2, 3, 1).reshape(B, L, C)
         
-        # Save for skip connection
-        skip = x_seq
+        # =============================================
+        # Stage 1: Pre-LN → SS2D Block → Residual
+        # =============================================
         
-        # Pre-normalize and project
-        x_norm = self.pre_norm(x_seq)
-        x_proj = self.in_proj(x_norm)  # (B, L, d_inner)
+        # Pre-Normalization: X1 = LN(X)
+        x1 = self.norm1(x_flat)
         
-        # === 4 Independent Directional Scans ===
+        # SS2D Block:
+        # 1. Linear projection
+        h = self.in_proj(x1)  # (B, L, d_inner)
         
-        # 1. Left-to-Right (row-major)
-        y_lr = self.mamba_lr(x_proj)
+        # 2. DWConv (need spatial reshape)
+        h_2d = h.reshape(B, H, W, self.d_inner).permute(0, 3, 1, 2)  # (B, d_inner, H, W)
+        h_2d = self.dw_conv(h_2d)
+        h = h_2d.permute(0, 2, 3, 1).reshape(B, L, self.d_inner)  # (B, L, d_inner)
         
-        # 2. Right-to-Left (row-major reversed)
-        x_rl = torch.flip(x_proj, dims=[1])
-        y_rl = self.mamba_rl(x_rl)
-        y_rl = torch.flip(y_rl, dims=[1])  # Flip back
+        # 3. SiLU activation
+        h = F.silu(h)
         
-        # 3. Top-to-Bottom (column-major)
-        x_tb = x_proj.view(B, H, W, -1).permute(0, 2, 1, 3).contiguous().view(B, L, -1)
-        y_tb = self.mamba_tb(x_tb)
-        y_tb = y_tb.view(B, W, H, -1).permute(0, 2, 1, 3).contiguous().view(B, L, -1)
+        # 4. SS2D (4-way scan)
+        h = self._ss2d_forward(h, H, W)
         
-        # 4. Bottom-to-Top (column-major reversed)
-        x_bt = torch.flip(x_tb, dims=[1])
-        y_bt = self.mamba_bt(x_bt)
-        y_bt = torch.flip(y_bt, dims=[1])
-        y_bt = y_bt.view(B, W, H, -1).permute(0, 2, 1, 3).contiguous().view(B, L, -1)
+        # 5. LayerNorm
+        h = self.norm_ss2d(h)
         
-        # === Gated Fusion ===
-        gate = F.softmax(self.fusion_gate, dim=0)
-        y_fused = gate[0] * y_lr + gate[1] * y_rl + gate[2] * y_tb + gate[3] * y_bt
+        # 6. Linear projection back
+        h = self.out_proj(h)  # (B, L, C)
         
-        # Output projection (NO activation after SS2D)
-        out = self.out_proj(y_fused)
+        # First Residual: X2 = X + SS2D_Block(X1)
+        x2 = x_flat + h
         
-        # Skip connection with learnable gate
-        out = self.skip_gate * out + (1 - self.skip_gate) * skip
+        # =============================================
+        # Stage 2: LN → FFN → Residual
+        # =============================================
+        
+        # FFN: LN → Linear → SiLU → Linear
+        h2 = self.ffn(self.norm2(x2))
+        
+        # Second Residual: Y = X2 + FFN(LN(X2))
+        y = x2 + h2
         
         # Reshape back: (B, L, C) -> (B, C, H, W)
-        out = rearrange(out, 'b (h w) c -> b c h w', h=H, w=W)
+        y = y.reshape(B, H, W, C).permute(0, 3, 1, 2)
         
-        return out
+        return y
+
+
+# Alias for backward compatibility
+GlobalSS2DBranch = VSSBlock
 
 
 # =============================================================================
@@ -325,12 +418,13 @@ class DualBranchFusion(nn.Module):
         # Branch 1: Local-Mid Spatial & Channel
         self.local_branch = LocalMidBranch(channels, dilation=dilation)
         
-        # Branch 2: Global SS2D
-        self.global_branch = GlobalSS2DBranch(
+        # Branch 2: Global VSS Block (standard vision Mamba)
+        self.global_branch = VSSBlock(
             d_model=channels,
             d_state=d_state,
             d_conv=4,
-            expand=1
+            expand=2,
+            ffn_expand=4
         )
         
         # Fusion: Concat (2C) -> Proj (C)

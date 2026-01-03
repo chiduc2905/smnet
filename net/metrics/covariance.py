@@ -300,16 +300,25 @@ class SlotCovarianceBlock(nn.Module):
             
         Returns:
             (B, num_classes) similarity scores for classification
+            
+        Note:
+            Mahalanobis distance is NEGATED to convert to similarity:
+            - Lower distance → Higher similarity → Higher score
+            - This is required for CrossEntropy loss compatibility
         """
         # Compute class-level covariance matrices
         _, inv_covariances = self.compute_class_covariances(
             support_slots, support_weights
         )
         
-        # Compute similarity scores
-        scores = self.compute_similarity(
+        # Compute distance scores
+        distances = self.compute_similarity(
             query_slots, inv_covariances, query_weights
         )
+        
+        # CRITICAL: Negate distances to convert to similarities
+        # Lower distance = more similar = higher score
+        scores = -distances
         
         return scores
     
