@@ -5,7 +5,7 @@ Extracted from baseline models for reuse in proposed architectures.
 
 from .euclidean import EuclideanDistance, squared_euclidean_distance
 from .cosine import CosineBlock, cosine_similarity
-from .covariance import CovaBlock
+from .covariance import CovaBlock, SlotCovarianceBlock
 from .relation import RelationBlock
 from .local_knn import LocalKNN, local_knn_score
 from .emd import SinkhornDistance, sinkhorn_distance
@@ -19,6 +19,7 @@ __all__ = [
     'CosineBlock',
     'cosine_similarity',
     'CovaBlock',
+    'SlotCovarianceBlock',
     'RelationBlock',
     'LocalKNN',
     'local_knn_score',

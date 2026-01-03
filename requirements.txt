@@ -1,13 +1,25 @@
+# Core PyTorch
 torch>=2.0.0
 torchvision>=0.15.0
+
+# Numerical and ML
 numpy>=1.21.0
 scikit-learn>=1.0.0
-tqdm>=4.60.0
+scipy>=1.7.0
+
+# Data and visualization
 Pillow>=8.0.0
 matplotlib>=3.0.0
 seaborn>=0.11.0
-scipy>=1.7.0
-tsnecuda; platform_system == "Linux"
-wandb>=0.12.0
-thop>=0.1.1  # For FLOPs/MACs calculation
 
+# Progress and logging
+tqdm>=4.60.0
+wandb>=0.12.0
+
+# Mamba state-space model (requires CUDA)
+mamba-ssm>=1.0.0
+einops>=0.6.0
+
+# Utilities
+thop>=0.1.1  # For FLOPs/MACs calculation
+tsnecuda; platform_system == "Linux"
