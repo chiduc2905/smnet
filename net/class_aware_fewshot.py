@@ -36,7 +36,7 @@ from net.backbone.feature_extractor import (
     PatchMerging2D
 )
 from net.backbone.dual_branch_fusion import DualBranchFusion
-from net.backbone.slot_attention import SlotAttentionMamba
+from net.backbone.slot_attention import SlotAttention
 from net.backbone.class_aware_inference import (
     ClassAwareInferenceHead,
     SlotAttentionWithPatches
@@ -134,7 +134,7 @@ class ClassAwareSMNet(nn.Module):
         # ============================================================
         # STAGE 5: Slot Attention with Mamba (replaces GRU + SlotMamba)
         # ============================================================
-        slot_attention = SlotAttentionMamba(
+        slot_attention = SlotAttention(
             num_slots=num_slots,
             dim=hidden_dim,
             iters=slot_iters,
