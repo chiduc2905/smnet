@@ -31,8 +31,8 @@ class SlotMamba(nn.Module):
         d_model: int,
         d_state: int = 16,
         d_conv: int = 4,
-        expand: int = 2,
-        num_layers: int = 2
+        expand: int = 1,
+        num_layers: int = 1
     ):
         super().__init__()
         

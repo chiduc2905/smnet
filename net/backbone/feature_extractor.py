@@ -40,7 +40,7 @@ class SlotFeatureExtractor(nn.Module):
     def __init__(
         self,
         in_channels: int = 3,
-        hidden_dim: int = 256,
+        hidden_dim: int = 96,
         num_slots: int = 4,
         convmixer_depth: int = 4,
         convmixer_kernel: int = 9,
@@ -76,7 +76,7 @@ class SlotFeatureExtractor(nn.Module):
             d_model=hidden_dim,
             d_state=16,
             d_conv=4,
-            expand=2,
+            expand=1,
             dropout=0.0
         )
         
@@ -93,8 +93,8 @@ class SlotFeatureExtractor(nn.Module):
             d_model=hidden_dim,
             d_state=16,
             d_conv=4,
-            expand=2,
-            num_layers=slot_mamba_layers
+            expand=1,
+            num_layers=1
         )
     
     def forward(

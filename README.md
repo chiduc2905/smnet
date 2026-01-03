@@ -152,10 +152,10 @@ smnet/
 
 ## Model Variants
 
-| Model | Hidden Dim | ConvMixer Depth | Slot Mamba Layers | Parameters |
-|-------|------------|-----------------|-------------------|------------|
-| **SMNet** | 256 | 4 | 2 | ~5M |
-| **SMNet-Light** | 128 | 2 | 1 | ~1.5M |
+| Model | Hidden Dim | Expand | Mamba Layers | Parameters |
+|-------|-----------|--------|--------------|------------|
+| **SMNet** | 96 | 1 | 1 | ~500K |
+| **SMNet-Light** | 48 | 1 | 1 | ~150K |
 
 ## Theory
 

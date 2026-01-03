@@ -58,7 +58,7 @@ def get_args():
     # Model
     parser.add_argument('--model', type=str, default='smnet', 
                         choices=['smnet', 'smnet_light'])
-    parser.add_argument('--hidden_dim', type=int, default=256,
+    parser.add_argument('--hidden_dim', type=int, default=96,
                         help='Hidden dimension for feature extractor')
     parser.add_argument('--num_slots', type=int, default=4,
                         help='Number of semantic slots K')

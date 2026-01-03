@@ -36,7 +36,7 @@ class SMNet(nn.Module):
     def __init__(
         self,
         in_channels: int = 3,
-        hidden_dim: int = 256,
+        hidden_dim: int = 96,
         num_slots: int = 4,
         learnable_slots: bool = True,
         regularization: float = 1e-3,
