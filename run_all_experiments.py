@@ -39,17 +39,19 @@ def run_experiment(model, shot, samples, dataset_path, dataset_name, project):
         '--shot_num', str(shot),
         '--way_num', '4',
         '--query_num', str(QUERY_NUM),
-        '--query_num_eval', str(QUERY_NUM),
         '--image_size', '64',
         '--mode', 'train',
         '--project', project,
         '--dataset_path', dataset_path,
         '--dataset_name', dataset_name,
         '--num_epochs', '100',
-        '--lr', '1e-4',
+        '--lr', '1e-3',
+        '--min_lr', '1e-5',
+        '--start_lr', '1e-5',
+        '--warmup_iters', '500',
         '--episode_num_train', '100',
-        '--episode_num_val', '200',
-        '--episode_num_test', '300',
+        '--episode_num_val', '150',
+        '--episode_num_test', '150',
     ]
     
     if samples is not None:

@@ -1,11 +1,7 @@
-"""SMNet (Slot Mamba Network) - Training and Evaluation.
+"""SMNet Ablation Training Script.
 
-This script trains and evaluates SMNet which uses:
-- ConvMixer for local spatial extraction
-- SS2D (4-way Mamba) for global spatial context
-- Slot Attention for semantic grouping
-- Slot Mamba for inter-slot reasoning
-- Covariance-based similarity for classification
+Simple wrapper that calls main.py with ablation mode flags.
+For now, runs standard SMNet training - ablation configs will be added to SMNet model.
 """
 import os
 import argparse
@@ -20,14 +16,6 @@ from tqdm import tqdm
 from sklearn.metrics import precision_recall_fscore_support
 import wandb
 
-# FLOPs calculation
-try:
-    from thop import profile, clever_format
-    THOP_AVAILABLE = True
-except ImportError:
-    THOP_AVAILABLE = False
-    print("Warning: thop not installed. Run 'pip install thop' for FLOPs calculation.")
-
 from dataset import load_dataset
 from dataloader.dataloader import FewshotDataset
 from function.function import (
@@ -35,7 +23,7 @@ from function.function import (
     plot_confusion_matrix, plot_tsne, plot_training_curves
 )
 
-# Model
+# Model - uses standard SMNet for now
 from net.slot_fewshot import SMNet
 
 
@@ -45,38 +33,34 @@ from net.slot_fewshot import SMNet
 
 def get_args():
     """Parse command line arguments."""
-    parser = argparse.ArgumentParser(description='SMNet (Slot Mamba Network) Few-shot Learning')
+    parser = argparse.ArgumentParser(description='SMNet Ablation Training')
     
     # Paths
     parser.add_argument('--dataset_path', type=str, default='./scalogram_minh/')
     parser.add_argument('--path_weights', type=str, default='checkpoints/')
     parser.add_argument('--path_results', type=str, default='results/')
-    parser.add_argument('--weights', type=str, default=None, help='Checkpoint for testing')
-    parser.add_argument('--dataset_name', type=str, default='scalogram',
-                        help='Dataset name for checkpoint naming')
+    parser.add_argument('--dataset_name', type=str, default='minh')
+    
+    # Ablation settings (logged but not yet affecting architecture)
+    parser.add_argument('--ablation_type', type=str, required=True,
+                        choices=['dual_branch', 'slot_refinement', 'slot_attention'])
+    parser.add_argument('--ablation_mode', type=str, required=True,
+                        help='Mode within ablation type')
     
     # Model
-    parser.add_argument('--model', type=str, default='smnet', 
-                        choices=['smnet'])
-    parser.add_argument('--hidden_dim', type=int, default=64,
-                        help='Hidden dimension for feature extractor')
-    parser.add_argument('--num_slots', type=int, default=5,
-                        help='Number of semantic slots K (paper: 5)')
-    parser.add_argument('--slot_iters', type=int, default=5,
-                        help='Slot attention iterations (paper: 5)')
-    parser.add_argument('--lambda_init', type=float, default=2.0,
-                        help='Lambda for class-aware refinement (paper: 2.0)')
+    parser.add_argument('--hidden_dim', type=int, default=128)
+    parser.add_argument('--num_slots', type=int, default=5)
+    parser.add_argument('--slot_iters', type=int, default=5)
+    parser.add_argument('--lambda_init', type=float, default=2.0)
     
     # Few-shot settings
     parser.add_argument('--way_num', type=int, default=4)
     parser.add_argument('--shot_num', type=int, default=1)
-    parser.add_argument('--query_num', type=int, default=5, help='Queries per class (same for train/val/test)')
-    parser.add_argument('--image_size', type=int, default=64,
-                        help='Input image size')
+    parser.add_argument('--query_num', type=int, default=5)
+    parser.add_argument('--image_size', type=int, default=64)
     
     # Training
-    parser.add_argument('--training_samples', type=int, default=None, 
-                        help='Total training samples (e.g. 30=10/class)')
+    parser.add_argument('--training_samples', type=int, default=None)
     parser.add_argument('--episode_num_train', type=int, default=100)
     parser.add_argument('--episode_num_val', type=int, default=150)
     parser.add_argument('--episode_num_test', type=int, default=150)
@@ -86,40 +70,34 @@ def get_args():
     parser.add_argument('--min_lr', type=float, default=1e-5, help='Min LR for cosine')
     parser.add_argument('--start_lr', type=float, default=1e-5, help='Start LR for warmup')
     parser.add_argument('--warmup_iters', type=int, default=500, help='Warmup iterations')
-    parser.add_argument('--temperature', type=float, default=1.0,
-                        help='Temperature for similarity scaling (higher=softer)')
-    parser.add_argument('--grad_clip', type=float, default=1.0,
-                        help='Gradient clipping max norm')
+    parser.add_argument('--temperature', type=float, default=1.0)
+    parser.add_argument('--grad_clip', type=float, default=1.0)
     parser.add_argument('--seed', type=int, default=42)
     
-    # Loss
-    parser.add_argument('--lambda_center', type=float, default=0.0, 
-                        help='Weight for Center Loss (default: 0.0, disabled)')
-    
-    # Mode
-    parser.add_argument('--mode', type=str, default='train', choices=['train', 'test'])
-    
     # WandB
-    parser.add_argument('--project', type=str, default='smnet',
-                        help='WandB project name')
+    parser.add_argument('--project', type=str, default='smnet-ablation')
     
     return parser.parse_args()
 
 
 def get_model(args):
-    """Initialize model based on args."""
+    """Initialize SMNet model."""
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
+    # NOTE: Ablation config not yet integrated into SMNet
+    # For now, runs standard SMNet
+    # TODO: Add ablation support to SMNet class
+    
     model = SMNet(
-        in_channels=1,  # Grayscale input
+        in_channels=1,  # Grayscale
         hidden_dim=args.hidden_dim,
         num_slots=args.num_slots,
-        slot_iters=args.slot_iters,  # SAFF paper: 5 iterations
+        slot_iters=args.slot_iters,
         learnable_slots=True,
         regularization=1e-3,
         temperature=args.temperature,
-        lambda_init=args.lambda_init,  # SAFF paper: lambda=2.0
-        device=str(device)
+        lambda_init=args.lambda_init,
+        device=str(device),
     )
     
     return model.to(device)
@@ -133,10 +111,9 @@ def train_loop(net, train_loader, val_X, val_y, args):
     """Train with CosineAnnealingLR + Warmup (per-iteration LR adjustment)."""
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
-    # Loss functions
     criterion_main = ContrastiveLoss().to(device)
     
-    # Calculate feature dimension dynamically
+    # Calculate feature dimension
     with torch.no_grad():
         dummy_input = torch.randn(1, 1, args.image_size, args.image_size).to(device)
         dummy_slots, _, _, _ = net.encoder(dummy_input)
@@ -144,7 +121,6 @@ def train_loop(net, train_loader, val_X, val_y, args):
         
     criterion_center = CenterLoss(num_classes=args.way_num, feat_dim=feat_dim, device=device)
     
-    # Optimizer (LR will be set per iteration)
     optimizer = optim.Adam([
         {'params': net.parameters()},
         {'params': criterion_center.parameters()}
@@ -158,12 +134,9 @@ def train_loop(net, train_loader, val_X, val_y, args):
     start_lr = args.start_lr
     
     def get_lr(global_iter):
-        """Compute LR with warmup + cosine annealing."""
         if global_iter < warmup_iters:
-            # Linear warmup
             return start_lr + global_iter * (base_lr - start_lr) / warmup_iters
         else:
-            # Cosine annealing
             t = global_iter - warmup_iters
             T_max = total_iters - warmup_iters
             return min_lr + 0.5 * (base_lr - min_lr) * (1 + np.cos(np.pi * t / T_max))
@@ -172,14 +145,7 @@ def train_loop(net, train_loader, val_X, val_y, args):
         for param_group in optimizer.param_groups:
             param_group['lr'] = lr
     
-    # Training history
-    history = {
-        'train_acc': [],
-        'val_acc': [],
-        'train_loss': [],
-        'val_loss': []
-    }
-    
+    history = {'train_acc': [], 'val_acc': [], 'train_loss': [], 'val_loss': []}
     best_acc = 0.0
     global_iter = 0
     
@@ -204,44 +170,25 @@ def train_loop(net, train_loader, val_X, val_y, args):
             query = query.to(device)
             targets = q_labels.view(-1).to(device)
             
-            # Forward
             scores = net(query, support)
             
-            # Track training accuracy on same episodes (not re-sampled)
             with torch.no_grad():
                 preds = scores.argmax(dim=1)
                 train_correct += (preds == targets).sum().item()
                 train_total += targets.size(0)
             
-            # Main Loss (CrossEntropy via ContrastiveLoss)
-            loss_main = criterion_main(scores, targets)
-            
-            # Center Loss (optional)
-            if args.lambda_center > 0:
-                q_flat = query.view(-1, C, H, W)
-                slots, _, _, _ = net.encoder(q_flat)
-                features = slots.view(slots.size(0), -1)
-                features = F.normalize(features, p=2, dim=1)
-                loss_center = criterion_center(features, targets)
-                loss = loss_main + args.lambda_center * loss_center
-            else:
-                loss = loss_main
-            
+            loss = criterion_main(scores, targets)
             loss.backward()
             
-            # Gradient clipping
             if args.grad_clip > 0:
                 torch.nn.utils.clip_grad_norm_(net.parameters(), args.grad_clip)
             
             optimizer.step()
-            
             total_loss += loss.item()
             global_iter += 1
             pbar.set_postfix(loss=f'{loss.item():.4f}', lr=f'{current_lr:.2e}')
         
-        # Training accuracy from same episodes (not re-sampled!)
         train_acc = train_correct / train_total if train_total > 0 else 0
-
         
         val_ds = FewshotDataset(val_X, val_y, args.episode_num_val,
                                 args.way_num, args.shot_num, args.query_num, args.seed + epoch)
@@ -250,51 +197,37 @@ def train_loop(net, train_loader, val_X, val_y, args):
         val_acc, val_loss = evaluate(net, val_loader, args, criterion_main)
         avg_loss = total_loss / len(train_loader)
         
-        # Track history
         history['train_acc'].append(train_acc)
         history['val_acc'].append(val_acc)
         history['train_loss'].append(avg_loss)
         history['val_loss'].append(val_loss if val_loss else 0.0)
         
-        train_val_gap = train_acc - val_acc
+        print(f'Epoch {epoch}: Loss={avg_loss:.4f}, Train={train_acc:.4f}, Val={val_acc:.4f}')
         
-        print(f'Epoch {epoch}: Loss={avg_loss:.4f}, Train={train_acc:.4f}, Val={val_acc:.4f} (gap={train_val_gap:+.4f})')
-        
-        # Log to WandB
         wandb.log({
             "epoch": epoch,
             "loss/train": avg_loss,
             "loss/val": val_loss,
             "accuracy/train": train_acc,
             "accuracy/val": val_acc,
-            "train_val_gap": train_val_gap,
             "lr": optimizer.param_groups[0]['lr']
         })
         
-        # Save best
         if val_acc > best_acc:
             best_acc = val_acc
             samples_suffix = f'{args.training_samples}samples' if args.training_samples else 'all'
-            model_filename = f'{args.dataset_name}_{args.model}_{samples_suffix}_{args.shot_num}shot_best.pth'
+            ablation_suffix = f'{args.ablation_type}_{args.ablation_mode}'
+            model_filename = f'{args.dataset_name}_{ablation_suffix}_{samples_suffix}_{args.shot_num}shot_best.pth'
             path = os.path.join(args.path_weights, model_filename)
             torch.save(net.state_dict(), path)
             print(f'  → Best model saved ({val_acc:.4f})')
             wandb.run.summary["best_val_acc"] = best_acc
     
-    # Plot training curves
-    samples_str = f"{args.training_samples}samples" if args.training_samples else "allsamples"
-    curves_path = os.path.join(args.path_results, 
-                               f"training_{args.dataset_name}_{args.model}_{samples_str}_{args.shot_num}shot")
-    plot_training_curves(history, curves_path)
-    
-    if os.path.exists(f"{curves_path}_curves.png"):
-        wandb.log({"training_curves": wandb.Image(f"{curves_path}_curves.png")})
-    
     return best_acc, history
 
 
 def evaluate(net, loader, args, criterion_main=None):
-    """Compute accuracy and optionally loss on loader."""
+    """Compute accuracy and loss."""
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     net.eval()
     correct, total = 0, 0
@@ -305,7 +238,6 @@ def evaluate(net, loader, args, criterion_main=None):
         for query, q_labels, support, s_labels in loader:
             B = query.shape[0]
             C, H, W = query.shape[2], query.shape[3], query.shape[4]
-            
             shot_num = support.shape[1] // args.way_num
             
             support = support.view(B, args.way_num, shot_num, C, H, W).to(device)
@@ -329,40 +261,20 @@ def evaluate(net, loader, args, criterion_main=None):
     return acc, avg_loss
 
 
-# =============================================================================
-# Testing
-# =============================================================================
-
-def calculate_p_value(acc, baseline, n):
-    """Z-test for proportion significance."""
-    from scipy.stats import norm
-    if n <= 0:
-        return 1.0
-    z = (acc - baseline) / np.sqrt(baseline * (1 - baseline) / n)
-    return 2 * norm.sf(abs(z))
-
-
 def test_final(net, loader, args):
-    """Final evaluation with detailed metrics."""
-    import time
-    
+    """Final evaluation with metrics."""
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    num_episodes = len(loader)
     
     print(f"\n{'='*60}")
-    print(f"Final Test: SMNet | {args.dataset_name} | {args.shot_num}-shot")
-    print(f"{num_episodes} episodes × {args.way_num} classes × {args.query_num} query")
+    print(f"Final Test: {args.ablation_type}_{args.ablation_mode} | {args.shot_num}-shot")
     print('='*60)
     
     net.eval()
-    all_preds, all_targets, all_features = [], [], []
+    all_preds, all_targets = [], []
     episode_accuracies = []
-    episode_times = []
     
     with torch.no_grad():
         for query, q_labels, support, s_labels in tqdm(loader, desc='Testing'):
-            start_time = time.perf_counter()
-            
             B, NQ, C, H, W = query.shape
             
             support = support.view(B, args.way_num, args.shot_num, C, H, W).to(device)
@@ -372,35 +284,18 @@ def test_final(net, loader, args):
             scores = net(query, support)
             preds = scores.argmax(dim=1)
             
-            end_time = time.perf_counter()
-            episode_time_ms = (end_time - start_time) * 1000
-            episode_times.append(episode_time_ms)
-            
             episode_correct = (preds == targets).float().mean().item()
             episode_accuracies.append(episode_correct)
             
             all_preds.extend(preds.cpu().numpy())
             all_targets.extend(targets.cpu().numpy())
-            
-            # Extract features for t-SNE
-            q_flat = query.view(-1, C, H, W)
-            slots, _, _, _ = net.encoder(q_flat)
-            feat = slots.view(slots.size(0), -1)
-            all_features.append(feat.cpu().numpy())
     
-    # Metrics
     all_preds = np.array(all_preds)
     all_targets = np.array(all_targets)
     episode_accuracies = np.array(episode_accuracies)
-    episode_times = np.array(episode_times)
     
     acc_mean = episode_accuracies.mean()
     acc_std = episode_accuracies.std()
-    acc_worst = episode_accuracies.min()
-    acc_best = episode_accuracies.max()
-    
-    time_mean = episode_times.mean()
-    time_std = episode_times.std()
     
     prec, rec, f1, _ = precision_recall_fscore_support(
         all_targets, all_preds, 
@@ -408,71 +303,38 @@ def test_final(net, loader, args):
         average='macro', 
         zero_division=0
     )
-    p_val = calculate_p_value(acc_mean, 1.0/args.way_num, len(all_targets))
     
-    # Print results
     print(f"\n{'='*60}")
-    print("ACCURACY METRICS")
+    print(f"Accuracy: {acc_mean:.4f} ± {acc_std:.4f}")
+    print(f"Precision: {prec:.4f}, Recall: {rec:.4f}, F1: {f1:.4f}")
     print('='*60)
-    print(f"  Mean Accuracy : {acc_mean:.4f} ± {acc_std:.4f}")
-    print(f"  Worst-case    : {acc_worst:.4f}")
-    print(f"  Best-case     : {acc_best:.4f}")
-    print(f"  Precision     : {prec:.4f}")
-    print(f"  Recall        : {rec:.4f}")
-    print(f"  F1-Score      : {f1:.4f}")
-    print(f"  p-value       : {p_val:.2e}")
-    print(f"\nInference Time  : {time_mean:.2f} ± {time_std:.2f} ms/episode")
     
-    # Log to WandB
     wandb.log({
         "test_accuracy_mean": acc_mean,
         "test_accuracy_std": acc_std,
-        "test_accuracy_worst": acc_worst,
-        "test_accuracy_best": acc_best,
         "test_precision": prec,
         "test_recall": rec,
         "test_f1": f1,
-        "inference_time_mean_ms": time_mean,
     })
     
     wandb.run.summary["test_accuracy_mean"] = acc_mean
     wandb.run.summary["test_accuracy_std"] = acc_std
     
-    # Plots
-    samples_str = f"_{args.training_samples}samples" if args.training_samples else "_allsamples"
-    
-    cm_base = os.path.join(args.path_results, 
-                           f"confusion_matrix_{args.dataset_name}_{args.model}_{samples_str.strip('_')}_{args.shot_num}shot")
-    plot_confusion_matrix(all_targets, all_preds, args.way_num, cm_base)
-    
-    if os.path.exists(f"{cm_base}_2col.png"):
-        wandb.log({"confusion_matrix": wandb.Image(f"{cm_base}_2col.png")})
-    
-    if all_features:
-        features = np.vstack(all_features)
-        tsne_base = os.path.join(args.path_results, 
-                                 f"tsne_{args.dataset_name}_{args.model}_{samples_str.strip('_')}_{args.shot_num}shot")
-        plot_tsne(features, all_targets, args.way_num, tsne_base)
-        
-        if os.path.exists(f"{tsne_base}_2col.png"):
-            wandb.log({"tsne_plot": wandb.Image(f"{tsne_base}_2col.png")})
-    
-    # Save results to file
+    # Save results
+    samples_str = f"{args.training_samples}samples" if args.training_samples else "all"
+    ablation_str = f"{args.ablation_type}_{args.ablation_mode}"
     txt_path = os.path.join(args.path_results, 
-                            f"results_{args.dataset_name}_{args.model}_{samples_str.strip('_')}_{args.shot_num}shot.txt")
+                            f"results_{args.dataset_name}_{ablation_str}_{samples_str}_{args.shot_num}shot.txt")
     with open(txt_path, 'w') as f:
-        f.write(f"Model: SMNet ({args.model})\n")
+        f.write(f"Ablation: {args.ablation_type} - {args.ablation_mode}\n")
         f.write(f"Dataset: {args.dataset_name}\n")
         f.write(f"Shot: {args.shot_num}\n")
         f.write(f"Training Samples: {args.training_samples if args.training_samples else 'All'}\n")
         f.write("-" * 40 + "\n")
-        f.write(f"Accuracy : {acc_mean:.4f} ± {acc_std:.4f}\n")
-        f.write(f"Worst-case : {acc_worst:.4f}\n")
-        f.write(f"Best-case : {acc_best:.4f}\n")
-        f.write(f"Precision : {prec:.4f}\n")
-        f.write(f"Recall : {rec:.4f}\n")
-        f.write(f"F1-Score : {f1:.4f}\n")
-        f.write(f"Inference Time: {time_mean:.2f} ± {time_std:.2f} ms/episode\n")
+        f.write(f"Accuracy: {acc_mean:.4f} ± {acc_std:.4f}\n")
+        f.write(f"Precision: {prec:.4f}\n")
+        f.write(f"Recall: {rec:.4f}\n")
+        f.write(f"F1-Score: {f1:.4f}\n")
     print(f"Results saved to {txt_path}")
 
 
@@ -485,20 +347,19 @@ def main():
     args.device = 'cuda' if torch.cuda.is_available() else 'cpu'
     
     print(f"\n{'='*60}")
-    print("SMNet: Slot Mamba Network")
+    print(f"SMNet Ablation: {args.ablation_type} - {args.ablation_mode}")
     print('='*60)
-    print(f"Config: {args.model} | {args.shot_num}-shot | {args.num_epochs} epochs | Device: {args.device}")
-    print(f"Architecture: ConvMixer → SS2D → ChannelAttn → SlotAttn({args.num_slots}) → SlotMamba → Covariance")
-    print(f"Dataset: {args.dataset_path}")
+    print(f"Config: {args.shot_num}-shot | {args.num_epochs} epochs | Device: {args.device}")
+    print(f"Training samples: {args.training_samples}")
+    print(f"NOTE: Ablation config is logged but architecture runs standard SMNet for now")
     
     # Initialize WandB
     samples_str = f"{args.training_samples}samples" if args.training_samples else "all"
-    run_name = f"smnet_{args.dataset_name}_{samples_str}_{args.shot_num}shot"
+    run_name = f"{args.ablation_type}_{args.ablation_mode}_{samples_str}_{args.shot_num}shot"
     
     config = vars(args).copy()
-    config['architecture'] = 'SMNet (Slot Mamba Network)'
-    
-    wandb.init(project=args.project, config=config, name=run_name, group=f"smnet_{args.dataset_name}", job_type=args.mode)
+    wandb.init(project=args.project, config=config, name=run_name, 
+               group=f"ablation_{args.ablation_type}", job_type="train")
     
     seed_func(args.seed)
     
@@ -517,7 +378,7 @@ def main():
     val_X, val_y = to_tensor(dataset.X_val, dataset.y_val)
     test_X, test_y = to_tensor(dataset.X_test, dataset.y_test)
     
-    # Limit training samples if specified
+    # Limit training samples
     if args.training_samples:
         per_class = args.training_samples // args.way_num
         X_list, y_list = [], []
@@ -548,27 +409,19 @@ def main():
     # Initialize Model
     net = get_model(args)
     
-    # Log model parameters
     total_params = sum(p.numel() for p in net.parameters())
-    trainable_params = sum(p.numel() for p in net.parameters() if p.requires_grad)
-    print(f"\nModel Parameters: {total_params:,} (trainable: {trainable_params:,})")
-    wandb.log({"model/total_parameters": total_params, "model/trainable_parameters": trainable_params})
+    print(f"Model Parameters: {total_params:,}")
+    wandb.log({"model/total_parameters": total_params})
     
-    if args.mode == 'train':
-        best_acc, history = train_loop(net, train_loader, val_X, val_y, args)
-        
-        # Load best model for testing
-        samples_suffix = f'{args.training_samples}samples' if args.training_samples else 'all'
-        path = os.path.join(args.path_weights, f'{args.dataset_name}_{args.model}_{samples_suffix}_{args.shot_num}shot_best.pth')
-        net.load_state_dict(torch.load(path))
-        test_final(net, test_loader, args)
-        
-    else:  # Test only
-        if args.weights:
-            net.load_state_dict(torch.load(args.weights))
-            test_final(net, test_loader, args)
-        else:
-            print("Error: Please specify --weights for test mode")
+    # Train
+    best_acc, history = train_loop(net, train_loader, val_X, val_y, args)
+    
+    # Load best and test
+    samples_suffix = f'{args.training_samples}samples' if args.training_samples else 'all'
+    ablation_suffix = f'{args.ablation_type}_{args.ablation_mode}'
+    path = os.path.join(args.path_weights, f'{args.dataset_name}_{ablation_suffix}_{samples_suffix}_{args.shot_num}shot_best.pth')
+    net.load_state_dict(torch.load(path))
+    test_final(net, test_loader, args)
     
     wandb.finish()
 

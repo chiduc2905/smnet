@@ -42,12 +42,15 @@ class AblationConfig:
     # Training
     training_samples_list: List[int] = field(default_factory=lambda: [80, 200, 600, 6000])
     num_epochs: int = 100
-    lr: float = 1e-4
+    lr: float = 1e-3  # Base LR
+    min_lr: float = 1e-5  # Min LR for cosine
+    start_lr: float = 1e-5  # Start LR for warmup
+    warmup_iters: int = 500  # Warmup iterations
     
     # Episodes
     episode_num_train: int = 100
-    episode_num_val: int = 200
-    episode_num_test: int = 300
+    episode_num_val: int = 150
+    episode_num_test: int = 150
     
     # WandB
     project: str = 'smnet-ablation'
