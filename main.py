@@ -111,8 +111,7 @@ def get_model(args):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
     model = SMNet(
-        in_channels=1,  # Grayscale input
-        hidden_dim=args.hidden_dim,
+        in_channels=3,  # RGB input
         num_slots=args.num_slots,
         slot_iters=args.slot_iters,  # SAFF paper: 5 iterations
         learnable_slots=True,

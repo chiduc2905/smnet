@@ -277,11 +277,11 @@ def get_args():
     parser.add_argument('--dataset_name', type=str, default='minh')
     parser.add_argument('--project', type=str, default='smnet-ablation')
     
-    parser.add_argument('--query_num', type=int, default=15,
-                        help='Query samples per class (default: 15)')
+    parser.add_argument('--query_num', type=int, default=5,
+                        help='Query samples per class (default: 5)')
     parser.add_argument('--num_epochs', type=int, default=100)
     
-    parser.add_argument('--training_samples', type=str, default='100,400,800,1600',
+    parser.add_argument('--training_samples', type=str, default='80,200,600,6000',
                         help='Comma-separated list of training sample sizes')
     
     parser.add_argument('--dry_run', action='store_true',

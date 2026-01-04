@@ -55,7 +55,6 @@ class SMNet(nn.Module):
         self,
         in_channels: int = 3,
         base_dim: int = 32,
-        hidden_dim: int = 64,
         num_slots: int = 5,  # SAFF paper: 5 slots optimal
         slot_iters: int = 5,  # SAFF paper: 5 iterations optimal
         num_merging_stages: int = 2,
@@ -63,20 +62,20 @@ class SMNet(nn.Module):
         regularization: float = 1e-3,  # kept for backward compatibility
         temperature: float = 1.0,  # Higher for better gradients
         lambda_init: float = 2.0,  # SAFF paper: lambda=2.0
-        device: str = 'cuda'
+        device: str = 'cuda',
+        **kwargs  # For backward compatibility (absorbs hidden_dim if passed)
     ):
         super().__init__()
         
         self.base_dim = base_dim
-        self.hidden_dim = hidden_dim
         self.num_slots = num_slots
         self.device = device
         
         # Shared Feature Extractor (Mamba-based Slot Attention)
+        # Note: hidden_dim removed, now uses final_merge_dim (128 for 2 merge stages)
         self.encoder = SlotFeatureExtractor(
             in_channels=in_channels,
             base_dim=base_dim,
-            hidden_dim=hidden_dim,
             num_slots=num_slots,
             learnable_slots=learnable_slots,
             patch_kernel=3,
@@ -84,12 +83,14 @@ class SMNet(nn.Module):
             dual_branch_dilation=2,
             d_state=16,
             slot_iters=slot_iters,  # Now configurable, SAFF paper: 5
-            slot_mamba_layers=1
         )
+        
+        # Get final dimension from encoder (128 for 2 merge stages with base_dim=32)
+        self.hidden_dim = self.encoder.final_merge_dim
         
         # Class-Aware Inference Head
         self.inference_head = ClassAwareInferenceHead(
-            dim=hidden_dim,
+            dim=self.hidden_dim,
             temperature=temperature,
             lambda_init=lambda_init,
             learnable_lambda=True,

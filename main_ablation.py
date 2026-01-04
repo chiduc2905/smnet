@@ -48,7 +48,6 @@ def get_args():
                         help='Mode within ablation type')
     
     # Model
-    parser.add_argument('--hidden_dim', type=int, default=128)
     parser.add_argument('--num_slots', type=int, default=5)
     parser.add_argument('--slot_iters', type=int, default=5)
     parser.add_argument('--lambda_init', type=float, default=2.0)
@@ -89,8 +88,7 @@ def get_model(args):
     # TODO: Add ablation support to SMNet class
     
     model = SMNet(
-        in_channels=1,  # Grayscale
-        hidden_dim=args.hidden_dim,
+        in_channels=3,  # RGB
         num_slots=args.num_slots,
         slot_iters=args.slot_iters,
         learnable_slots=True,
