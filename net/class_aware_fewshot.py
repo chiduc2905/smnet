@@ -5,19 +5,18 @@ Implements a slot-based, class-aware few-shot network that combines:
 - Slot Attention with Mamba (replaces GRU with Mamba for slot updates)
 - Class-Aware Inference Head with patch-to-patch similarity
 
-Architecture v5 (Class-Aware with Mamba):
-    Input:       (B, 1, 224, 224)
-    PatchEmbed:  (B, 32, 224, 224)
-    Merge1:      (B, 64, 112, 112)
-    Merge2:      (B, 128, 56, 56)
-    Merge3:      (B, 256, 28, 28)
-    Proj:        (B, 64, 28, 28)
-    DualBranch:  (B, 64, 28, 28)
+Architecture v6 (RGB 64×64 Class-Aware with Mamba):
+    Input:       (B, 3, 64, 64)    ← RGB
+    PatchEmbed:  (B, 32, 64, 64)
+    Merge1:      (B, 64, 32, 32)
+    Merge2:      (B, 128, 16, 16)  ← N = 256 patches
+    Proj:        (B, 64, 16, 16)
+    DualBranch:  (B, 64, 16, 16)
     
     SlotAttentionMamba (Mamba replaces GRU):
         - Slots: (B, K, 64)
-        - Attn:  (B, K, 784)
-        - Patches: (B, 784, 64)
+        - Attn:  (B, K, 256)
+        - Patches: (B, 256, 64)
     
     Class-Aware Inference:
         - Class Embeddings from support slots
@@ -57,7 +56,7 @@ class ClassAwareSMNet(nn.Module):
         3. Class-conditioned patch refinement
     
     Args:
-        in_channels: Input image channels (default: 1 for grayscale)
+        in_channels: Input image channels (default: 3 for RGB)
         base_dim: Base embedding dimension (default: 32)
         hidden_dim: Final hidden dimension (default: 64)
         num_slots: Number of semantic slots K (default: 4)
@@ -71,11 +70,11 @@ class ClassAwareSMNet(nn.Module):
     
     def __init__(
         self,
-        in_channels: int = 1,
+        in_channels: int = 3,
         base_dim: int = 32,
         hidden_dim: int = 64,
         num_slots: int = 4,
-        num_merging_stages: int = 3,
+        num_merging_stages: int = 2,
         slot_iters: int = 3,
         d_state: int = 16,
         temperature: float = 0.1,
@@ -277,7 +276,7 @@ class ClassAwareSMNet(nn.Module):
     def get_attention_maps(
         self,
         images: torch.Tensor,
-        spatial_size: Tuple[int, int] = (28, 28)
+        spatial_size: Tuple[int, int] = (16, 16)
     ) -> torch.Tensor:
         """Get slot attention maps reshaped to spatial dimensions.
         

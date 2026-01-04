@@ -173,6 +173,8 @@ def train_loop(net, train_loader, val_X, val_y, args):
     for epoch in range(1, args.num_epochs + 1):
         net.train()
         total_loss = 0.0
+        train_correct = 0
+        train_total = 0
         
         pbar = tqdm(train_loader, desc=f'Epoch {epoch}/{args.num_epochs}')
         for query, q_labels, support, s_labels in pbar:
@@ -187,6 +189,12 @@ def train_loop(net, train_loader, val_X, val_y, args):
             
             # Forward
             scores = net(query, support)
+            
+            # Track training accuracy on same episodes (not re-sampled)
+            with torch.no_grad():
+                preds = scores.argmax(dim=1)
+                train_correct += (preds == targets).sum().item()
+                train_total += targets.size(0)
             
             # Main Loss (CrossEntropy via ContrastiveLoss)
             loss_main = criterion_main(scores, targets)
@@ -215,8 +223,9 @@ def train_loop(net, train_loader, val_X, val_y, args):
         
         scheduler.step()
         
-        # Evaluate
-        train_acc, _ = evaluate(net, train_loader, args)
+        # Training accuracy from same episodes (not re-sampled!)
+        train_acc = train_correct / train_total if train_total > 0 else 0
+
         
         val_ds = FewshotDataset(val_X, val_y, args.episode_num_val,
                                 args.way_num, args.shot_num, args.query_num_eval, args.seed + epoch)

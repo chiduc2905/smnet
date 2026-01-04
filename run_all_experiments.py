@@ -15,10 +15,13 @@ def get_args():
 
 
 # Configuration
-SHOTS = [1, 5, 10]
+SHOTS = [1, 5]
 
-# Training samples: [min for 10-shot, medium, large, all]
-SAMPLES_LIST = [80, 800, 1600, 6000]
+# Training samples: [min, small, medium, large]
+SAMPLES_LIST = [80, 200, 600, 6000]
+
+# Query samples (same for train/val/test)
+QUERY_NUM = 5
 
 # Model variants
 MODELS = ['smnet']
@@ -35,6 +38,8 @@ def run_experiment(model, shot, samples, dataset_path, dataset_name, project):
         '--model', model,
         '--shot_num', str(shot),
         '--way_num', '4',
+        '--query_num', str(QUERY_NUM),
+        '--query_num_eval', str(QUERY_NUM),
         '--image_size', '64',
         '--mode', 'train',
         '--project', project,

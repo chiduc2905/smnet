@@ -1,16 +1,17 @@
 """SMNet Feature Extractor: Unified slot-based feature extraction.
 
-Pipeline (v4 - 224×224 input):
+Pipeline (v7 - RGB 64×64 input):
     1. PatchEmbed2D: Overlapping patch embedding (stride=1)
-    2. PatchMerging2D: Swin-style hierarchical patch merging (224→112→56→28)
-    3. DualBranchFusion: Parallel local-global feature extraction
-    4. Slot Attention: Semantic grouping into K slots
-    5. Slot Mamba: Slot-level global reasoning
+    2. PatchMerging2D: Swin-style hierarchical patch merging (64→32→16)
+    3. DualBranchFusion: Parallel local-global feature extraction (C=128)
+    4. Slot Attention (with integrated Mamba): Semantic grouping into K slots
 
-Changes from v3:
-    - Input size changed from 64×64 to 224×224 (grayscale)
-    - Replaced SpatialDownsample with PatchMerging2D (Swin-style)
-    - Hierarchical channel expansion: C → 2C → 4C → 8C
+Note: SlotMamba removed - Mamba is now integrated directly into SlotAttention
+for slot updates, eliminating the need for a separate SlotMamba module.
+
+Changes from v6:
+    - Removed Channel Projection layer
+    - DualBranch and SlotAttention now work with C=128 (final_merge_dim)
 """
 import torch
 import torch.nn as nn
@@ -18,7 +19,6 @@ from typing import Optional, Tuple
 
 from .dual_branch_fusion import DualBranchFusion
 from .slot_attention import SlotAttention
-from .slot_mamba import SlotMamba
 
 
 # =============================================================================
@@ -32,7 +32,7 @@ class PatchEmbed2D(nn.Module):
     Uses kernel_size=3, stride=1, padding='same' for overlapping patches.
     
     Args:
-        in_channels: Number of input image channels (default: 1)
+        in_channels: Number of input image channels (default: 3 for RGB)
         embed_dim: Embedding dimension (default: 64)
         kernel_size: Convolution kernel size (default: 3)
         norm_layer: Normalization layer (default: LayerNorm)
@@ -40,7 +40,7 @@ class PatchEmbed2D(nn.Module):
     
     def __init__(
         self,
-        in_channels: int = 1,
+        in_channels: int = 3,
         embed_dim: int = 64,
         kernel_size: int = 3,
         norm_layer: nn.Module = nn.LayerNorm
@@ -206,36 +206,29 @@ class SpatialDownsample(nn.Module):
 class SlotFeatureExtractor(nn.Module):
     """Complete feature extractor with PatchEmbed2D and PatchMerging2D.
     
-    Pipeline (v4 - 224×224 input):
-        1. PatchEmbed2D: Overlapping patch embedding (1, 224, 224) → (C, 224, 224)
+    Pipeline (v7 - RGB 64×64 input, no channel projection):
+        1. PatchEmbed2D: Overlapping patch embedding (3, 64, 64) → (C, 64, 64)
         2. PatchMerging2D stages: Hierarchical spatial reduction
-           - Stage 1: (C, 224, 224) → (2C, 112, 112)
-           - Stage 2: (2C, 112, 112) → (4C, 56, 56)
-           - Stage 3: (4C, 56, 56) → (8C, 28, 28)
-        3. Channel projection: 8C → hidden_dim (for lightweight slot attention)
-        4. DualBranchFusion: Parallel local-global with anchor-guided fusion
-        5. SlotAttention: Semantic grouping into slots
-        6. SlotMamba: Slot-level global reasoning
+           - Stage 1: (C, 64, 64) → (2C, 32, 32)
+           - Stage 2: (2C, 32, 32) → (4C, 16, 16)
+        3. DualBranchFusion: Parallel local-global with anchor-guided fusion (C=128)
+        4. SlotAttention (with Mamba): Semantic grouping into slots (C=128)
     
-    Tensor sizes for default config (C=32, hidden_dim=64):
-        Input:       (B, 1, 224, 224)
-        PatchEmbed:  (B, 32, 224, 224)   [50,176 tokens × 32 dim]
-        Merge1:      (B, 64, 112, 112)   [12,544 tokens × 64 dim]
-        Merge2:      (B, 128, 56, 56)    [3,136 tokens × 128 dim]
-        Merge3:      (B, 256, 28, 28)    [784 tokens × 256 dim]
-        Proj:        (B, 64, 28, 28)     [784 tokens × 64 dim]
-        DualBranch:  (B, 64, 28, 28)
-        Slots:       (B, K, 64)
+    Tensor sizes for default config (base_dim=32, num_merging_stages=2):
+        Input:       (B, 3, 64, 64)      [RGB]
+        PatchEmbed:  (B, 32, 64, 64)     [4,096 tokens × 32 dim]
+        Merge1:      (B, 64, 32, 32)     [1,024 tokens × 64 dim]
+        Merge2:      (B, 128, 16, 16)    [256 tokens × 128 dim]
+        DualBranch:  (B, 128, 16, 16)    [256 tokens × 128 dim]
+        Slots:       (B, K, 128)
     
     Args:
-        in_channels: Number of input channels (default: 1 for grayscale)
+        in_channels: Number of input channels (default: 3 for RGB)
         base_dim: Base embedding dimension (default: 32, doubles each stage)
-        hidden_dim: Final hidden dimension for slots (default: 64)
         num_slots: Maximum number of semantic slots K (default: 4)
         patch_kernel: Patch embedding kernel size (default: 3)
-        num_merging_stages: Number of PatchMerging2D stages (default: 3)
+        num_merging_stages: Number of PatchMerging2D stages (default: 2)
         slot_iters: Slot attention refinement iterations (default: 3)
-        slot_mamba_layers: Number of SlotMamba layers (default: 1)
         learnable_slots: Whether slot count is learnable (default: True)
         dual_branch_dilation: Dilation for local branch mid-range conv (default: 2)
         d_state: Mamba state dimension (default: 16)
@@ -243,14 +236,12 @@ class SlotFeatureExtractor(nn.Module):
     
     def __init__(
         self,
-        in_channels: int = 1,
+        in_channels: int = 3,
         base_dim: int = 32,
-        hidden_dim: int = 64,
         num_slots: int = 4,
         patch_kernel: int = 3,
-        num_merging_stages: int = 3,
+        num_merging_stages: int = 2,
         slot_iters: int = 3,
-        slot_mamba_layers: int = 1,
         learnable_slots: bool = True,
         dual_branch_dilation: int = 2,
         d_state: int = 16
@@ -258,13 +249,12 @@ class SlotFeatureExtractor(nn.Module):
         super().__init__()
         
         self.base_dim = base_dim
-        self.hidden_dim = hidden_dim
         self.num_slots = num_slots
         self.learnable_slots = learnable_slots
         self.num_merging_stages = num_merging_stages
         
         # Stage 1: Overlapping Patch Embedding (stride=1)
-        # (B, 1, 224, 224) → (B, base_dim, 224, 224)
+        # (B, 3, 64, 64) → (B, base_dim, 64, 64)
         self.patch_embed = PatchEmbed2D(
             in_channels=in_channels,
             embed_dim=base_dim,
@@ -284,39 +274,25 @@ class SlotFeatureExtractor(nn.Module):
             current_dim = current_dim * 2  # Channels double each stage
         
         # Final channel dimension after merging stages
-        # For 3 stages with base_dim=32: 32 → 64 → 128 → 256
+        # For 2 stages with base_dim=32: 32 → 64 → 128
         self.final_merge_dim = current_dim
         
-        # Stage 3: Channel Projection (reduce to hidden_dim for slot attention)
-        # 256 → 64 (if base_dim=32, num_merging_stages=3)
-        self.channel_proj = nn.Sequential(
-            nn.Conv2d(self.final_merge_dim, hidden_dim, kernel_size=1, bias=False),
-            nn.BatchNorm2d(hidden_dim),
-            nn.GELU()
-        )
-        
-        # Stage 4: DualBranchFusion (Local + Global with anchor residual)
+        # Stage 3: DualBranchFusion (Local + Global with anchor residual)
+        # Works directly with final_merge_dim (128) - no channel projection
         self.dual_branch = DualBranchFusion(
-            channels=hidden_dim,
+            channels=self.final_merge_dim,
             d_state=d_state,
             dilation=dual_branch_dilation
         )
         
-        # Stage 5: Slot Attention for semantic grouping
+        # Stage 4: Slot Attention for semantic grouping (Mamba integrated)
+        # Works with final_merge_dim (128)
         self.slot_attention = SlotAttention(
             num_slots=num_slots,
-            dim=hidden_dim,
+            dim=self.final_merge_dim,
             iters=slot_iters,
-            learnable_slots=learnable_slots
-        )
-        
-        # Stage 6: Slot Mamba for slot-level global reasoning
-        self.slot_mamba = SlotMamba(
-            d_model=hidden_dim,
             d_state=d_state,
-            d_conv=4,
-            expand=1,
-            num_layers=slot_mamba_layers
+            learnable_slots=learnable_slots
         )
     
     def forward(
@@ -326,7 +302,7 @@ class SlotFeatureExtractor(nn.Module):
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
         Args:
-            x: (B, C_in, H, W) input images (expected: B, 1, 224, 224)
+            x: (B, C_in, H, W) input images (expected: B, 3, 64, 64)
             return_intermediates: Whether to return intermediate features
             
         Returns:
@@ -334,26 +310,21 @@ class SlotFeatureExtractor(nn.Module):
             slot_weights: (B, K) slot existence weights (if learnable_slots)
         """
         # Stage 1: Overlapping patch embedding
-        # (B, 1, 224, 224) → (B, base_dim, 224, 224)
+        # (B, 3, 64, 64) → (B, base_dim, 64, 64)
         features = self.patch_embed(x)
         
         # Stage 2: Hierarchical patch merging
-        # (B, 32, 224, 224) → (B, 64, 112, 112) → (B, 128, 56, 56) → (B, 256, 28, 28)
+        # (B, 32, 64, 64) → (B, 64, 32, 32) → (B, 128, 16, 16)
         for merge_layer in self.merging_stages:
             features = merge_layer(features)
         
-        # Stage 3: Channel projection
-        # (B, 256, 28, 28) → (B, 64, 28, 28)
-        features = self.channel_proj(features)
+        # Stage 3: Dual-branch local-global fusion (C=128, no projection)
+        features = self.dual_branch(features)  # (B, 128, 16, 16)
         
-        # Stage 4: Dual-branch local-global fusion
-        features = self.dual_branch(features)  # (B, hidden_dim, H', W')
+        # Stage 4: Slot attention with integrated Mamba
+        slots, slot_weights, attn = self.slot_attention(features, return_attn=True)  # (B, K, 128), (B, K), (B, K, H'*W')
         
-        # Stage 5: Slot attention - semantic grouping (with attention maps)
-        slots, slot_weights, attn = self.slot_attention(features, return_attn=True)  # (B, K, hidden_dim), (B, K), (B, K, H'*W')
-        
-        # Stage 6: Slot-level global reasoning
-        slots = self.slot_mamba(slots)  # (B, K, hidden_dim)
+        # NOTE: SlotMamba removed - Mamba is now inside SlotAttention for slot updates
         
         return slots, slot_weights, features, attn
     
@@ -369,7 +340,7 @@ class SlotFeatureExtractor(nn.Module):
             threshold: Threshold for slot activation
             
         Returns:
-            (B, K, hidden_dim) weighted slot descriptors
+            (B, K, final_merge_dim) weighted slot descriptors (128 dim)
         """
         slots, slot_weights, _, _ = self.forward(x)
         
@@ -397,20 +368,15 @@ class SlotFeatureExtractor(nn.Module):
             features = merge_layer(features)
             merge_outputs.append(features)
         
-        # Stage 3: Channel projection
-        proj_features = self.channel_proj(features)
+        # Stage 3: Dual-branch - detailed (C=128, no projection)
+        branch_outputs = self.dual_branch.get_branch_outputs(features)
         
-        # Stage 4: Dual-branch - detailed
-        branch_outputs = self.dual_branch.get_branch_outputs(proj_features)
-        
-        # Stage 5 & 6: Slots
+        # Stage 4: Slots (Mamba integrated into SlotAttention)
         slots, slot_weights = self.slot_attention(branch_outputs['fused'])
-        slots = self.slot_mamba(slots)
         
         return {
             'patch_embed_out': patch_features,
             'merge_stage_outputs': merge_outputs,
-            'channel_proj_out': proj_features,
             'local_branch': branch_outputs['local'],
             'global_branch': branch_outputs['global'],
             'fused': branch_outputs['fused'],
@@ -436,9 +402,9 @@ def build_slot_extractor(
         Configured SlotFeatureExtractor instance
     
     Note:
-        For 224×224 input with default settings (base_dim=32, num_merging_stages=3):
-        - Spatial: 224 → 112 → 56 → 28
-        - Channels: 32 → 64 → 128 → 256 → 64 (after projection)
+        For 64×64 RGB input with default settings (base_dim=32, num_merging_stages=2):
+        - Spatial: 64 → 32 → 16
+        - Channels: 32 → 64 → 128 (no projection, DualBranch/SlotAttention use 128)
     """
     # Default num_slots to num_classes if not specified
     if 'num_slots' not in kwargs:

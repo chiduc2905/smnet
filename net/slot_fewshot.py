@@ -1,21 +1,21 @@
 """SMNet (Slot Mamba Network) for few-shot learning.
 
-Architecture (with Class-Aware Inference):
+Architecture (RGB 64×64 with Class-Aware Inference):
 - PatchEmbed2D: Overlapping patch embedding (stride=1)
-- PatchMerging2D: Swin-style hierarchical patch merging
+- PatchMerging2D: Swin-style hierarchical patch merging (64→32→16)
 - DualBranchFusion: Parallel local-global with anchor-guided fusion
-  - Local Branch: ConvMixer++
-  - Global Branch: SS2D (4-way Mamba)
+  - Local Branch: AG-LKA (Attention-Guided Large Kernel Attention)
+  - Global Branch: VSS Block (4-way Mamba)
 - Slot Attention (Mamba): Semantic grouping into K slots
 - Slot Mamba: Inter-slot reasoning
 - Class-Aware Inference: Slot-based class-conditioned patch refinement
 
 Pipeline:
-    Input:       (B, 1, H, W)
-    PatchEmbed:  (B, 32, H, W)
-    Merge1-3:    (B, 256, H', W')
-    Proj:        (B, 64, H', W')
-    DualBranch:  (B, 64, H', W')
+    Input:       (B, 3, 64, 64)    ← RGB
+    PatchEmbed:  (B, 32, 64, 64)
+    Merge1-2:    (B, 128, 16, 16)  ← N = 256 patches
+    Proj:        (B, 64, 16, 16)
+    DualBranch:  (B, 64, 16, 16)
     Slots:       (B, K, 64)
     ClassAware:  (NQ, Way) similarity scores
 """
@@ -39,12 +39,12 @@ class SMNet(nn.Module):
     Hyperparameters follow SAFF paper (arXiv:2508.09699) recommendations.
     
     Args:
-        in_channels: Input image channels (default: 1 for grayscale)
+        in_channels: Input image channels (default: 3 for RGB)
         base_dim: Base embedding dimension (default: 32, doubles each merge stage)
         hidden_dim: Final hidden dimension for slots (default: 64)
         num_slots: Number of semantic slots K (default: 5, SAFF paper optimal)
         slot_iters: Number of slot attention iterations (default: 5, SAFF paper optimal)
-        num_merging_stages: Number of PatchMerging2D stages (default: 3)
+        num_merging_stages: Number of PatchMerging2D stages (default: 2 for 64×64)
         learnable_slots: Whether slot count is learnable (default: True)
         temperature: Temperature for similarity scaling (default: 1.0)
         lambda_init: Initial value for residual scaling λ (default: 2.0, SAFF paper)
@@ -53,12 +53,12 @@ class SMNet(nn.Module):
     
     def __init__(
         self,
-        in_channels: int = 1,
+        in_channels: int = 3,
         base_dim: int = 32,
         hidden_dim: int = 64,
         num_slots: int = 5,  # SAFF paper: 5 slots optimal
         slot_iters: int = 5,  # SAFF paper: 5 iterations optimal
-        num_merging_stages: int = 3,
+        num_merging_stages: int = 2,
         learnable_slots: bool = True,
         regularization: float = 1e-3,  # kept for backward compatibility
         temperature: float = 1.0,  # Higher for better gradients
