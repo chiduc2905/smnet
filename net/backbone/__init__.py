@@ -23,11 +23,11 @@ from .feature_extractor import SlotFeatureExtractor, PatchEmbed2D, PatchMerging2
 from .class_aware_inference import ClassAwareInferenceHead, SlotAttentionWithPatches
 
 # M5 & M6: Slot Refinement modules (NEW)
-from .slot_covariance_attention import SlotCovarianceAttention, compute_class_covariance
-from .channel_metric_attention import ChannelMetricAttention, compute_class_prototype
+from .slot_covariance_attention import SlotCovarianceAttention, compute_class_covariance, compute_class_prototype
+from .channel_metric_attention import ChannelMetricAttention
 
 # SAFF: Slot Attention-based Feature Filtering (from paper arXiv:2508.09699)
-from .saff import SAFFModule, SAFFSlotAttention, SAFFClassToken
+from .saff import SAFFModule, SAFFSlotAttention
 
 __all__ = [
     # Legacy modules (still available)
@@ -60,5 +60,4 @@ __all__ = [
     # SAFF Module
     'SAFFModule',
     'SAFFSlotAttention',
-    'SAFFClassToken',
 ]
