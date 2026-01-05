@@ -200,16 +200,6 @@ def train_loop(net, train_loader, val_X, val_y, args):
             "accuracy/val": val_acc,
             "lr": optimizer.param_groups[0]['lr']
         })
-        
-        if val_acc > best_acc:
-            best_acc = val_acc
-            samples_suffix = f'{args.training_samples}samples' if args.training_samples else 'all'
-            ablation_suffix = f'{args.ablation_type}_{args.ablation_mode}'
-            model_filename = f'{args.dataset_name}_{ablation_suffix}_{samples_suffix}_{args.shot_num}shot_best.pth'
-            path = os.path.join(args.path_weights, model_filename)
-            torch.save(net.state_dict(), path)
-            print(f'  → Best model saved ({val_acc:.4f})')
-            wandb.run.summary["best_val_acc"] = best_acc
     
     # Save final epoch model (proper protocol)
     samples_suffix = f'{args.training_samples}samples' if args.training_samples else 'all'
