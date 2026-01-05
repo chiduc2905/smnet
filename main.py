@@ -90,6 +90,10 @@ def get_args():
                         help='Temperature for similarity scaling (higher=softer)')
     parser.add_argument('--grad_clip', type=float, default=1.0,
                         help='Gradient clipping max norm')
+    parser.add_argument('--step_size', type=int, default=10,
+                        help='StepLR step size (epochs)')
+    parser.add_argument('--gamma', type=float, default=0.1,
+                        help='StepLR gamma (LR multiplier)')
     parser.add_argument('--seed', type=int, default=42)
     
     # Loss
@@ -143,33 +147,19 @@ def train_loop(net, train_loader, val_X, val_y, args):
         
     criterion_center = CenterLoss(num_classes=args.way_num, feat_dim=feat_dim, device=device)
     
-    # Optimizer (LR will be set per iteration)
+    # Optimizer
     optimizer = optim.Adam([
         {'params': net.parameters()},
         {'params': criterion_center.parameters()}
     ], lr=args.lr)
     
-    # CosineAnnealingLR + Warmup parameters
-    total_iters = args.num_epochs * args.episode_num_train
-    warmup_iters = args.warmup_iters
-    base_lr = args.lr
-    min_lr = args.min_lr
-    start_lr = args.start_lr
-    
-    def get_lr(global_iter):
-        """Compute LR with warmup + cosine annealing."""
-        if global_iter < warmup_iters:
-            # Linear warmup
-            return start_lr + global_iter * (base_lr - start_lr) / warmup_iters
-        else:
-            # Cosine annealing
-            t = global_iter - warmup_iters
-            T_max = total_iters - warmup_iters
-            return min_lr + 0.5 * (base_lr - min_lr) * (1 + np.cos(np.pi * t / T_max))
-    
-    def set_lr(optimizer, lr):
-        for param_group in optimizer.param_groups:
-            param_group['lr'] = lr
+    # StepLR Scheduler - simple step decay
+    # LR = 0.001, gamma = 0.1, step_size = 10 epochs
+    scheduler = lr_scheduler.StepLR(
+        optimizer, 
+        step_size=args.step_size,  # Decay every 10 epochs
+        gamma=args.gamma  # Multiply by 0.1
+    )
     
     # Training history
     history = {
@@ -180,7 +170,6 @@ def train_loop(net, train_loader, val_X, val_y, args):
     }
     
     best_acc = 0.0
-    global_iter = 0
     
     for epoch in range(1, args.num_epochs + 1):
         net.train()
@@ -190,10 +179,6 @@ def train_loop(net, train_loader, val_X, val_y, args):
         
         pbar = tqdm(train_loader, desc=f'Epoch {epoch}/{args.num_epochs}')
         for query, q_labels, support, s_labels in pbar:
-            # Set LR for this iteration
-            current_lr = get_lr(global_iter)
-            set_lr(optimizer, current_lr)
-            
             optimizer.zero_grad()
             
             B = query.shape[0]
@@ -235,8 +220,11 @@ def train_loop(net, train_loader, val_X, val_y, args):
             optimizer.step()
             
             total_loss += loss.item()
-            global_iter += 1
+            current_lr = optimizer.param_groups[0]['lr']
             pbar.set_postfix(loss=f'{loss.item():.4f}', lr=f'{current_lr:.2e}')
+        
+        # Step scheduler at end of epoch
+        scheduler.step()
         
         # Training accuracy from same episodes (not re-sampled!)
         train_acc = train_correct / train_total if train_total > 0 else 0

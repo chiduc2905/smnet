@@ -1,23 +1,26 @@
 """SMNet (Slot Mamba Network) for few-shot learning.
 
-Architecture (RGB 64×64 with Class-Aware Inference):
+Architecture (RGB 64×64 with SAFF Module):
 - PatchEmbed2D: Overlapping patch embedding (stride=1)
 - PatchMerging2D: Swin-style hierarchical patch merging (64→32→16)
 - DualBranchFusion: Parallel local-global with anchor-guided fusion
   - Local Branch: AG-LKA (Attention-Guided Large Kernel Attention)
   - Global Branch: VSS Block (4-way Mamba)
-- Slot Attention (Mamba): Semantic grouping into K slots
-- Slot Mamba: Inter-slot reasoning
-- Class-Aware Inference: Slot-based class-conditioned patch refinement
+- SAFF Module (from paper arXiv:2508.09699):
+  - Slot Attention: Semantic grouping into K slots
+  - Class Token: Class-agnostic embedding
+  - Slot-Class Filtering: Compare slots with class token
+  - Attention Mask: Apply filtered attention to patches
+  - Refined Patches: Weighted masking
+  - Similarity Matrix: Cross support/query patch similarity
+  - Conv1D + MLP → Final Score
 
 Pipeline:
     Input:       (B, 3, 64, 64)    ← RGB
     PatchEmbed:  (B, 32, 64, 64)
     Merge1-2:    (B, 128, 16, 16)  ← N = 256 patches
-    Proj:        (B, 64, 16, 16)
-    DualBranch:  (B, 64, 16, 16)
-    Slots:       (B, K, 64)
-    ClassAware:  (NQ, Way) similarity scores
+    DualBranch:  (B, 128, 16, 16)
+    SAFF:        (NQ, Way) similarity scores
 """
 import torch
 import torch.nn as nn
@@ -25,29 +28,26 @@ import torch.nn.functional as F
 from typing import Optional, List
 from einops import rearrange
 
-from net.backbone import SlotFeatureExtractor
-from net.backbone.class_aware_inference import ClassAwareInferenceHead
+from net.backbone.feature_extractor import PatchEmbed2D, PatchMerging2D
+from net.backbone.dual_branch_fusion import DualBranchFusion
+from net.backbone.saff import SAFFModule
 
 
 class SMNet(nn.Module):
-    """SMNet: Slot Mamba Network with Class-Aware Inference for few-shot classification.
+    """SMNet: Slot Mamba Network with SAFF for few-shot classification.
     
     Architecture:
-        1. Shared SlotFeatureExtractor for support and query
-        2. ClassAwareInferenceHead for slot-based classification
-    
-    Hyperparameters follow SAFF paper (arXiv:2508.09699) recommendations.
+        1. Backbone: PatchEmbed → PatchMerging → DualBranch
+        2. SAFF Module for slot-based classification
     
     Args:
         in_channels: Input image channels (default: 3 for RGB)
-        base_dim: Base embedding dimension (default: 32, doubles each merge stage)
-        hidden_dim: Final hidden dimension for slots (default: 64)
-        num_slots: Number of semantic slots K (default: 5, SAFF paper optimal)
-        slot_iters: Number of slot attention iterations (default: 5, SAFF paper optimal)
-        num_merging_stages: Number of PatchMerging2D stages (default: 2 for 64×64)
-        learnable_slots: Whether slot count is learnable (default: True)
-        temperature: Temperature for similarity scaling (default: 1.0)
-        lambda_init: Initial value for residual scaling λ (default: 2.0, SAFF paper)
+        base_dim: Base embedding dimension (default: 32)
+        num_slots: Number of semantic slots K (default: 5)
+        slot_iters: Number of slot attention iterations (default: 5)
+        num_merging_stages: Number of PatchMerging2D stages (default: 2)
+        lambda_init: Initial value for residual scaling λ (default: 2.0)
+        mask_threshold: Threshold for binary masking (default: None for weighted)
         device: Device to use
     """
     
@@ -55,15 +55,13 @@ class SMNet(nn.Module):
         self,
         in_channels: int = 3,
         base_dim: int = 32,
-        num_slots: int = 5,  # SAFF paper: 5 slots optimal
-        slot_iters: int = 5,  # SAFF paper: 5 iterations optimal
+        num_slots: int = 5,
+        slot_iters: int = 5,
         num_merging_stages: int = 2,
-        learnable_slots: bool = True,
-        regularization: float = 1e-3,  # kept for backward compatibility
-        temperature: float = 1.0,  # Higher for better gradients
-        lambda_init: float = 2.0,  # SAFF paper: lambda=2.0
+        lambda_init: float = 2.0,
+        mask_threshold: Optional[float] = None,
         device: str = 'cuda',
-        **kwargs  # For backward compatibility (absorbs hidden_dim if passed)
+        **kwargs  # For backward compatibility
     ):
         super().__init__()
         
@@ -71,33 +69,95 @@ class SMNet(nn.Module):
         self.num_slots = num_slots
         self.device = device
         
-        # Shared Feature Extractor (Mamba-based Slot Attention)
-        # Note: hidden_dim removed, now uses final_merge_dim (128 for 2 merge stages)
-        self.encoder = SlotFeatureExtractor(
+        # === Backbone (keep as-is from DualPath) ===
+        
+        # Stage 1: Overlapping Patch Embedding
+        # (B, 3, 64, 64) → (B, base_dim, 64, 64)
+        self.patch_embed = PatchEmbed2D(
             in_channels=in_channels,
-            base_dim=base_dim,
-            num_slots=num_slots,
-            learnable_slots=learnable_slots,
-            patch_kernel=3,
-            num_merging_stages=num_merging_stages,
-            dual_branch_dilation=2,
-            d_state=16,
-            slot_iters=slot_iters,  # Now configurable, SAFF paper: 5
+            embed_dim=base_dim,
+            kernel_size=3,
+            norm_layer=nn.LayerNorm
         )
         
-        # Get final dimension from encoder (128 for 2 merge stages with base_dim=32)
-        self.hidden_dim = self.encoder.final_merge_dim
+        # Stage 2: Hierarchical PatchMerging2D
+        # Each stage: spatial /2, channels ×2
+        self.merging_stages = nn.ModuleList()
+        current_dim = base_dim
         
-        # Class-Aware Inference Head
-        self.inference_head = ClassAwareInferenceHead(
+        for i in range(num_merging_stages):
+            self.merging_stages.append(
+                PatchMerging2D(dim=current_dim, norm_layer=nn.LayerNorm)
+            )
+            current_dim = current_dim * 2
+        
+        # Final channel dimension (128 for 2 merge stages with base_dim=32)
+        self.hidden_dim = current_dim
+        
+        # Number of patches after merging
+        # 64→32→16, so num_patches = 16×16 = 256
+        self.num_patches = (64 // (2 ** num_merging_stages)) ** 2
+        
+        # Stage 3: DualBranchFusion
+        self.dual_branch = DualBranchFusion(
+            channels=self.hidden_dim,
+            d_state=16,
+            dilation=2
+        )
+        
+        # === SAFF Module ===
+        # temperature parameter controls similarity scaling (lower = sharper gradients)
+        temperature = kwargs.get('temperature', 0.1)
+        self.saff = SAFFModule(
             dim=self.hidden_dim,
-            temperature=temperature,
+            num_slots=num_slots,
+            num_iters=slot_iters,
+            num_patches=self.num_patches,
             lambda_init=lambda_init,
-            learnable_lambda=True,
-            use_mlp_similarity=False
+            temperature=temperature,
+            debug=True  # Enable debug logging
         )
         
         self.to(device)
+    
+    def extract_features(self, x: torch.Tensor) -> torch.Tensor:
+        """Extract patch features using backbone.
+        
+        Args:
+            x: (B, C, H, W) input images
+            
+        Returns:
+            patches: (B, N, hidden_dim) patch embeddings
+        """
+        # Stage 1: Patch embedding
+        features = self.patch_embed(x)  # (B, 32, 64, 64)
+        
+        # Stage 2: Hierarchical merging
+        for merge in self.merging_stages:
+            features = merge(features)  # (B, 64, 32, 32) → (B, 128, 16, 16)
+        
+        # Stage 3: DualBranch fusion
+        features = self.dual_branch(features)  # (B, 128, 16, 16)
+        
+        # Convert to patches: (B, C, H, W) → (B, N, C)
+        patches = rearrange(features, 'b c h w -> b (h w) c')
+        
+        # Debug logging for feature extractor (periodic)
+        if self.training and hasattr(self, '_feat_debug_counter'):
+            self._feat_debug_counter += 1
+            if self._feat_debug_counter % 100 == 1:
+                with torch.no_grad():
+                    # Patch statistics
+                    patch_norm = patches.norm(dim=-1)  # (B, N)
+                    patch_mean = patches.mean()
+                    patch_std = patches.std()
+                    print(f"[DEBUG-FEAT] patches: shape={patches.shape}, "
+                          f"mean={patch_mean.item():.4f}, std={patch_std.item():.4f}, "
+                          f"norm_range=[{patch_norm.min().item():.2f}, {patch_norm.max().item():.2f}]")
+        elif self.training and not hasattr(self, '_feat_debug_counter'):
+            self._feat_debug_counter = 0
+        
+        return patches
     
     def forward(self, query: torch.Tensor, support: torch.Tensor) -> torch.Tensor:
         """Compute few-shot classification scores.
@@ -117,46 +177,20 @@ class SMNet(nn.Module):
         for b in range(B):
             # === Extract Query Features ===
             q_b = query[b]  # (NQ, C, H, W)
-            q_slots, q_weights, q_features, q_attn = self.encoder(q_b)
-            # q_slots: (NQ, K, hidden_dim)
-            # q_weights: (NQ, K)
-            # q_features: (NQ, hidden_dim, H', W')
-            # q_attn: (NQ, K, H'*W')
-            
-            # Convert features to patch format for ClassAwareInferenceHead
-            NQ_q, C_f, H_f, W_f = q_features.shape
-            q_patches = rearrange(q_features, 'b c h w -> b (h w) c')  # (NQ, N, C)
+            q_patches = self.extract_features(q_b)  # (NQ, N, hidden_dim)
             
             # === Extract Support Features per Class ===
             support_patches_list = []
-            support_slots_list = []
-            support_attn_list = []
-            support_weights_list = []
             
             for w in range(Way):
                 s_class = support[b, w]  # (Shot, C, H, W)
-                s_slots, s_weights, s_features, s_attn = self.encoder(s_class)
-                # s_slots: (Shot, K, hidden_dim)
-                # s_features: (Shot, hidden_dim, H', W')
-                # s_attn: (Shot, K, H'*W')
-                
-                # Convert to patch format
-                s_patches = rearrange(s_features, 'b c h w -> b (h w) c')  # (Shot, N, C)
-                
+                s_patches = self.extract_features(s_class)  # (Shot, N, hidden_dim)
                 support_patches_list.append(s_patches)
-                support_slots_list.append(s_slots)
-                support_attn_list.append(s_attn)
-                support_weights_list.append(s_weights)
             
-            # === Class-Aware Inference ===
-            scores = self.inference_head(
+            # === SAFF Forward ===
+            scores = self.saff(
                 query_patches=q_patches,
-                query_slots=q_slots,
-                query_attn=q_attn,
-                support_patches_list=support_patches_list,
-                support_slots_list=support_slots_list,
-                support_attn_list=support_attn_list,
-                support_weights_list=support_weights_list
+                support_patches_list=support_patches_list
             )  # (NQ, Way)
             
             scores_list.append(scores)
@@ -174,7 +208,8 @@ class SMNet(nn.Module):
             
         Returns:
             slots: (B, K, hidden_dim) slot descriptors
-            slot_weights: (B, K) slot existence weights
+            attn: (B, K, N) attention weights
         """
-        slots, slot_weights, _, _ = self.encoder(images)
-        return slots, slot_weights
+        patches = self.extract_features(images)
+        refined, slots, attn, mask = self.saff.encode(patches)
+        return slots, attn

@@ -10,6 +10,7 @@ Module hierarchy:
     M5: SlotCovarianceAttention (SCA) - Slot importance via covariance
     M6: ChannelMetricAttention (CMA) - Channel-wise slot refinement
     M7: ClassAwareInferenceHead - Few-shot classification
+    SAFF: SAFFModule       - Slot Attention-based Feature Filtering
 """
 
 from .convmixer import ConvMixerBlock, ConvMixerEncoder
@@ -24,6 +25,9 @@ from .class_aware_inference import ClassAwareInferenceHead, SlotAttentionWithPat
 # M5 & M6: Slot Refinement modules (NEW)
 from .slot_covariance_attention import SlotCovarianceAttention, compute_class_covariance
 from .channel_metric_attention import ChannelMetricAttention, compute_class_prototype
+
+# SAFF: Slot Attention-based Feature Filtering (from paper arXiv:2508.09699)
+from .saff import SAFFModule, SAFFSlotAttention, SAFFClassToken
 
 __all__ = [
     # Legacy modules (still available)
@@ -53,4 +57,8 @@ __all__ = [
     # M7: Class-Aware Inference
     'ClassAwareInferenceHead',
     'SlotAttentionWithPatches',
+    # SAFF Module
+    'SAFFModule',
+    'SAFFSlotAttention',
+    'SAFFClassToken',
 ]

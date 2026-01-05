@@ -39,6 +39,107 @@ from typing import Optional, Tuple, List
 from einops import rearrange
 
 
+# =============================================================================
+# Simple Slot Similarity (Recommended for Training)
+# =============================================================================
+
+class SimpleSlotSimilarity(nn.Module):
+    """Simple Slot-based Similarity for Few-Shot Learning.
+    
+    Architecture (following user diagram):
+        1. Compute cosine similarity per slot: sim_k = cos(q_slot_k, s_slot_k)
+        2. Concatenate all slot similarities: [sim_1, sim_2, ..., sim_K]
+        3. Conv1D aggregation → final score
+    
+    Args:
+        dim: Feature dimension
+        num_slots: Number of slots K (default: 5)
+        conv_kernel: Conv1D kernel size (default: 3)
+    """
+    
+    def __init__(self, dim: int, num_slots: int = 5, conv_kernel: int = 3, temperature: float = 10.0):
+        super().__init__()
+        self.dim = dim
+        self.num_slots = num_slots
+        
+        # Conv1D for score aggregation: K slots → 1 score
+        # Input: (B, 1, K), Output: (B, 1, 1)
+        self.score_conv = nn.Sequential(
+            nn.Conv1d(1, 16, kernel_size=conv_kernel, padding=conv_kernel // 2),
+            nn.ReLU(),
+            nn.Conv1d(16, 1, kernel_size=conv_kernel, padding=conv_kernel // 2),
+        )
+        
+        # Final projection to single score
+        self.score_fc = nn.Linear(num_slots, 1)
+    
+    def forward(
+        self,
+        query_slots: torch.Tensor,
+        query_weights: torch.Tensor,
+        support_slots_list: List[torch.Tensor],
+        support_weights_list: List[torch.Tensor],
+        **kwargs  # Ignore unused args for compatibility
+    ) -> torch.Tensor:
+        """Compute similarity scores between query and support.
+        
+        Args:
+            query_slots: (NQ, K, C) query slot descriptors
+            query_weights: (NQ, K) query slot importance weights
+            support_slots_list: List of (Shot, K, C) support slots per class
+            support_weights_list: List of (Shot, K) support weights per class
+            
+        Returns:
+            scores: (NQ, M) similarity scores, M = number of classes
+        """
+        NQ, K, C = query_slots.shape
+        M = len(support_slots_list)
+        
+        # L2 normalize query slots
+        query_slots_norm = F.normalize(query_slots, dim=-1)  # (NQ, K, C)
+        
+        scores = []
+        
+        for m in range(M):
+            support_slots = support_slots_list[m]  # (Shot, K, C)
+            Shot = support_slots.shape[0]
+            
+            # L2 normalize support slots
+            support_slots_norm = F.normalize(support_slots, dim=-1)  # (Shot, K, C)
+            
+            # Average support slots over shots → prototype per slot
+            support_proto = support_slots_norm.mean(dim=0)  # (K, C)
+            
+            # === Slot-wise Cosine Similarity ===
+            # For each slot k: sim_k = cos(query_slot_k, support_slot_k)
+            # query: (NQ, K, C), support: (K, C)
+            slot_sims = torch.einsum('nkc,kc->nk', query_slots_norm, support_proto)  # (NQ, K)
+            
+            # === Conv1D Aggregation ===
+            # Reshape for Conv1D: (NQ, K) → (NQ, 1, K)
+            slot_sims_conv = slot_sims.unsqueeze(1)  # (NQ, 1, K)
+            
+            # Apply Conv1D
+            conv_out = self.score_conv(slot_sims_conv)  # (NQ, 1, K)
+            
+            # Final FC to get single score per query
+            conv_out = conv_out.squeeze(1)  # (NQ, K)
+            sim = self.score_fc(conv_out).squeeze(-1)  # (NQ,)
+            
+            scores.append(sim)
+        
+        # Stack: (NQ, M)
+        scores = torch.stack(scores, dim=1)
+        
+        return scores
+
+
+# =============================================================================
+# Original Class-Aware Inference Head (Complex)
+# =============================================================================
+
+
+
 class ClassAwareInferenceHead(nn.Module):
     """Class-Aware Inference Head for slot-based few-shot learning.
     
@@ -59,12 +160,14 @@ class ClassAwareInferenceHead(nn.Module):
         temperature: float = 0.1,
         lambda_init: float = 0.5,
         learnable_lambda: bool = True,
-        use_mlp_similarity: bool = False
+        use_mlp_similarity: bool = True,  # Default True for Conv1D+MLP
+        num_patches: int = 256  # N = H'×W' = 16×16 = 256
     ):
         super().__init__()
         
         self.dim = dim
         self.temperature = temperature
+        self.num_patches = num_patches
         
         # Learnable residual scaling factor λ
         if learnable_lambda:
@@ -72,14 +175,20 @@ class ClassAwareInferenceHead(nn.Module):
         else:
             self.register_buffer('lambda_scale', torch.tensor(lambda_init))
         
-        # Optional MLP for similarity refinement
-        self.use_mlp_similarity = use_mlp_similarity
-        if use_mlp_similarity:
-            self.similarity_mlp = nn.Sequential(
-                nn.Linear(1, dim // 4),
-                nn.ReLU(),
-                nn.Linear(dim // 4, 1)
-            )
+        # Conv1D for similarity matrix aggregation (following user diagram)
+        # Input: (NQ, 1, N) where N = num_patches
+        self.sim_conv = nn.Sequential(
+            nn.Conv1d(1, 16, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv1d(16, 1, kernel_size=3, padding=1),
+        )
+        
+        # MLP for final similarity (following user diagram)
+        self.similarity_mlp = nn.Sequential(
+            nn.Linear(num_patches, dim // 2),
+            nn.ReLU(),
+            nn.Linear(dim // 2, 1)
+        )
         
         # Layer norm for patch refinement
         self.patch_norm = nn.LayerNorm(dim)
@@ -237,12 +346,11 @@ class ClassAwareInferenceHead(nn.Module):
     ) -> torch.Tensor:
         """Compute patch-to-patch similarity between query and support.
         
-        Step 7: Compute cosine similarity matrix between all pairs of patches,
-        then aggregate to get final similarity score.
-        
-        Following the paper diagram:
-            - Compute NxN' similarity matrix between refined patches
-            - Aggregate to scalar score (mean of max matching)
+        Following the user's diagram:
+            1. Compute NxN cosine similarity matrix between refined patches
+            2. Max over support patches for each query patch
+            3. Conv1D aggregation
+            4. MLP → final similarity score
         
         Args:
             query_patches: (NQ, N, C) refined query patches
@@ -263,25 +371,19 @@ class ClassAwareInferenceHead(nn.Module):
         
         # Compute patch-to-patch similarity matrix
         # query: (NQ, N, C), support: (N, C)
-        # sim_matrix: (NQ, N, N) - for each query, similarity between its patches and support patches
+        # sim_matrix: (NQ, N, N) - for each query patch, similarity to each support patch
         sim_matrix = torch.einsum('qnc,mc->qnm', query_norm, support_avg)  # (NQ, N, N)
         
-        # Aggregation strategy: Hungarian matching or soft matching
-        # Using soft matching: for each query patch, take max over support patches
-        max_sim_per_query_patch = sim_matrix.max(dim=-1)[0]  # (NQ, N)
+        # For each query patch, take max similarity over support patches
+        max_sim = sim_matrix.max(dim=-1)[0]  # (NQ, N)
         
-        # Also get max over query patches for each support
-        max_sim_per_support_patch = sim_matrix.max(dim=1)[0]  # (NQ, N)
+        # Conv1D aggregation: (NQ, N) → (NQ, 1, N) → Conv1D → (NQ, 1, N)
+        max_sim_conv = max_sim.unsqueeze(1)  # (NQ, 1, N)
+        conv_out = self.sim_conv(max_sim_conv)  # (NQ, 1, N)
+        conv_out = conv_out.squeeze(1)  # (NQ, N)
         
-        # Symmetric matching score: average of both directions
-        query_to_support = max_sim_per_query_patch.mean(dim=-1)  # (NQ,)
-        support_to_query = max_sim_per_support_patch.mean(dim=-1)  # (NQ,)
-        
-        # Final similarity: average of bidirectional matching
-        sim = (query_to_support + support_to_query) / 2.0  # (NQ,)
-        
-        if self.use_mlp_similarity:
-            sim = self.similarity_mlp(sim.unsqueeze(-1)).squeeze(-1)
+        # MLP to get final score: (NQ, N) → (NQ, 1)
+        sim = self.similarity_mlp(conv_out).squeeze(-1)  # (NQ,)
         
         return sim
     

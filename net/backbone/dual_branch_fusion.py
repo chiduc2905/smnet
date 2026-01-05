@@ -295,11 +295,13 @@ class VSSBlock(nn.Module):
             bias=False
         )
         
-        # 4 INDEPENDENT Mamba modules (no weight sharing)
-        self.mamba_lr = Mamba(d_model=self.d_inner, d_state=d_state, d_conv=d_conv, expand=1)
-        self.mamba_rl = Mamba(d_model=self.d_inner, d_state=d_state, d_conv=d_conv, expand=1)
-        self.mamba_tb = Mamba(d_model=self.d_inner, d_state=d_state, d_conv=d_conv, expand=1)
-        self.mamba_bt = Mamba(d_model=self.d_inner, d_state=d_state, d_conv=d_conv, expand=1)
+        # Shared Mamba module for all 4 directions (Weight Sharing)
+        self.mamba = Mamba(
+            d_model=self.d_inner,
+            d_state=d_state,
+            d_conv=d_conv,
+            expand=1
+        )
         
         # Post-SS2D LayerNorm
         self.norm_ss2d = nn.LayerNorm(self.d_inner)
@@ -310,7 +312,7 @@ class VSSBlock(nn.Module):
         # NO FFN - removed for few-shot learning
     
     def _ss2d_forward(self, x: torch.Tensor, H: int, W: int) -> torch.Tensor:
-        """Apply 4-way SS2D scanning (no weight sharing).
+        """Apply 4-way SS2D scanning with SHARED weights.
         
         Args:
             x: (B, L, d_inner) input sequence
@@ -322,21 +324,21 @@ class VSSBlock(nn.Module):
         B, L, D = x.shape
         
         # 1. Left-to-Right (row-major)
-        y_lr = self.mamba_lr(x)
+        y_lr = self.mamba(x)
         
         # 2. Right-to-Left (row-major reversed)
         x_rl = torch.flip(x, dims=[1])
-        y_rl = self.mamba_rl(x_rl)
+        y_rl = self.mamba(x_rl)
         y_rl = torch.flip(y_rl, dims=[1])
         
         # 3. Top-to-Bottom (column-major)
         x_tb = x.view(B, H, W, D).permute(0, 2, 1, 3).contiguous().view(B, L, D)
-        y_tb = self.mamba_tb(x_tb)
+        y_tb = self.mamba(x_tb)
         y_tb = y_tb.view(B, W, H, D).permute(0, 2, 1, 3).contiguous().view(B, L, D)
         
         # 4. Bottom-to-Top (column-major reversed)
         x_bt = torch.flip(x_tb, dims=[1])
-        y_bt = self.mamba_bt(x_bt)
+        y_bt = self.mamba(x_bt)
         y_bt = torch.flip(y_bt, dims=[1])
         y_bt = y_bt.view(B, W, H, D).permute(0, 2, 1, 3).contiguous().view(B, L, D)
         
