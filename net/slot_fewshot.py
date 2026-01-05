@@ -128,8 +128,7 @@ class SMNet(nn.Module):
                 num_iters=slot_iters,
                 num_patches=self.num_patches,
                 lambda_init=lambda_init,
-                temperature=temperature,
-                debug=True
+                temperature=temperature
             )
         else:
             # Simple cosine similarity head when SAFF disabled
