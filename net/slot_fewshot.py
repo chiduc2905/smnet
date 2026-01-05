@@ -61,7 +61,7 @@ class SMNet(nn.Module):
         lambda_init: float = 2.0,
         mask_threshold: Optional[float] = None,
         device: str = 'cuda',
-        **kwargs  # For backward compatibility
+        **kwargs  # For backward compatibility and ablation config
     ):
         super().__init__()
         
@@ -69,7 +69,19 @@ class SMNet(nn.Module):
         self.num_slots = num_slots
         self.device = device
         
-        # === Backbone (keep as-is from DualPath) ===
+        # === Ablation Config ===
+        ablation_type = kwargs.get('ablation_type', None)
+        ablation_mode = kwargs.get('ablation_mode', None)
+        
+        # SAFF ablation: 'with' (default) or 'without'
+        self.use_saff = not (ablation_type == 'saff' and ablation_mode == 'without')
+        
+        # DualBranch ablation: 'both' (default), 'local_only', 'global_only'
+        dual_branch_mode = 'both'
+        if ablation_type == 'dual_branch':
+            dual_branch_mode = ablation_mode
+        
+        # === Backbone ===
         
         # Stage 1: Overlapping Patch Embedding
         # (B, 3, 64, 64) → (B, base_dim, 64, 64)
@@ -98,25 +110,31 @@ class SMNet(nn.Module):
         # 64→32→16, so num_patches = 16×16 = 256
         self.num_patches = (64 // (2 ** num_merging_stages)) ** 2
         
-        # Stage 3: DualBranchFusion
+        # Stage 3: DualBranchFusion with ablation mode
         self.dual_branch = DualBranchFusion(
             channels=self.hidden_dim,
             d_state=16,
-            dilation=2
+            dilation=2,
+            mode=dual_branch_mode  # 'both', 'local_only', 'global_only'
         )
         
-        # === SAFF Module ===
-        # temperature parameter controls similarity scaling (lower = sharper gradients)
+        # === SAFF Module (conditional) ===
         temperature = kwargs.get('temperature', 0.1)
-        self.saff = SAFFModule(
-            dim=self.hidden_dim,
-            num_slots=num_slots,
-            num_iters=slot_iters,
-            num_patches=self.num_patches,
-            lambda_init=lambda_init,
-            temperature=temperature,
-            debug=True  # Enable debug logging
-        )
+        
+        if self.use_saff:
+            self.saff = SAFFModule(
+                dim=self.hidden_dim,
+                num_slots=num_slots,
+                num_iters=slot_iters,
+                num_patches=self.num_patches,
+                lambda_init=lambda_init,
+                temperature=temperature,
+                debug=True
+            )
+        else:
+            # Simple cosine similarity head when SAFF disabled
+            self.saff = None
+            self.temperature = temperature
         
         self.to(device)
     
@@ -187,11 +205,16 @@ class SMNet(nn.Module):
                 s_patches = self.extract_features(s_class)  # (Shot, N, hidden_dim)
                 support_patches_list.append(s_patches)
             
-            # === SAFF Forward ===
-            scores = self.saff(
-                query_patches=q_patches,
-                support_patches_list=support_patches_list
-            )  # (NQ, Way)
+            # === Classification ===
+            if self.use_saff:
+                # SAFF Forward
+                scores = self.saff(
+                    query_patches=q_patches,
+                    support_patches_list=support_patches_list
+                )  # (NQ, Way)
+            else:
+                # Simple cosine similarity (SAFF disabled ablation)
+                scores = self._simple_cosine_forward(q_patches, support_patches_list)
             
             scores_list.append(scores)
         
@@ -199,6 +222,44 @@ class SMNet(nn.Module):
         all_scores = torch.cat(scores_list, dim=0)  # (B*NQ, Way)
         
         return all_scores
+    
+    def _simple_cosine_forward(
+        self, 
+        query_patches: torch.Tensor, 
+        support_patches_list: List[torch.Tensor]
+    ) -> torch.Tensor:
+        """Simple prototype-based cosine similarity (when SAFF disabled).
+        
+        Args:
+            query_patches: (NQ, N, C) query patch embeddings
+            support_patches_list: List of (Shot, N, C) support patches per class
+            
+        Returns:
+            scores: (NQ, Way) similarity scores
+        """
+        NQ, N, C = query_patches.shape
+        Way = len(support_patches_list)
+        
+        # Global average pooling for query: (NQ, N, C) -> (NQ, C)
+        q_proto = query_patches.mean(dim=1)  # (NQ, C)
+        q_norm = F.normalize(q_proto, dim=-1)  # (NQ, C)
+        
+        scores = []
+        for w in range(Way):
+            s_patches = support_patches_list[w]  # (Shot, N, C)
+            # Global average pooling: (Shot, N, C) -> (Shot, C) -> (C,)
+            s_proto = s_patches.mean(dim=(0, 1))  # (C,)
+            s_norm = F.normalize(s_proto, dim=-1)  # (C,)
+            
+            # Cosine similarity: (NQ, C) @ (C,) -> (NQ,)
+            sim = torch.einsum('qc,c->q', q_norm, s_norm)
+            # Temperature scaling
+            sim = sim / self.temperature
+            scores.append(sim)
+        
+        # Stack: (NQ, Way)
+        scores = torch.stack(scores, dim=1)
+        return scores
     
     def get_slot_features(self, images: torch.Tensor) -> tuple:
         """Extract slot features for visualization.

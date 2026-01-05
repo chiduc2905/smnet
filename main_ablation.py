@@ -41,9 +41,9 @@ def get_args():
     parser.add_argument('--path_results', type=str, default='results/')
     parser.add_argument('--dataset_name', type=str, default='minh')
     
-    # Ablation settings (logged but not yet affecting architecture)
+    # Ablation settings
     parser.add_argument('--ablation_type', type=str, required=True,
-                        choices=['dual_branch', 'slot_refinement', 'slot_attention'])
+                        choices=['dual_branch', 'slot_refinement', 'slot_attention', 'saff'])
     parser.add_argument('--ablation_mode', type=str, required=True,
                         help='Mode within ablation type')
     
@@ -69,8 +69,13 @@ def get_args():
     parser.add_argument('--min_lr', type=float, default=1e-5, help='Min LR for cosine')
     parser.add_argument('--start_lr', type=float, default=1e-5, help='Start LR for warmup')
     parser.add_argument('--warmup_iters', type=int, default=500, help='Warmup iterations')
-    parser.add_argument('--temperature', type=float, default=1.0)
+    parser.add_argument('--temperature', type=float, default=0.1,
+                        help='Temperature for similarity scaling')
     parser.add_argument('--grad_clip', type=float, default=1.0)
+    parser.add_argument('--step_size', type=int, default=10,
+                        help='StepLR step size (epochs)')
+    parser.add_argument('--gamma', type=float, default=0.1,
+                        help='StepLR gamma (LR multiplier)')
     parser.add_argument('--seed', type=int, default=42)
     
     # WandB
@@ -80,22 +85,24 @@ def get_args():
 
 
 def get_model(args):
-    """Initialize SMNet model."""
+    """Initialize SMNet model with ablation config."""
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
-    # NOTE: Ablation config not yet integrated into SMNet
-    # For now, runs standard SMNet
-    # TODO: Add ablation support to SMNet class
+    # Ablation config passed to SMNet
+    ablation_config = {
+        'ablation_type': args.ablation_type,
+        'ablation_mode': args.ablation_mode,
+    }
     
     model = SMNet(
         in_channels=3,  # RGB
         num_slots=args.num_slots,
         slot_iters=args.slot_iters,
-        learnable_slots=True,
-        regularization=1e-3,
-        temperature=args.temperature,
         lambda_init=args.lambda_init,
+        temperature=args.temperature,
         device=str(device),
+        # Ablation config (SMNet will handle)
+        **ablation_config
     )
     
     return model.to(device)
@@ -124,28 +131,15 @@ def train_loop(net, train_loader, val_X, val_y, args):
         {'params': criterion_center.parameters()}
     ], lr=args.lr)
     
-    # CosineAnnealingLR + Warmup parameters
-    total_iters = args.num_epochs * args.episode_num_train
-    warmup_iters = args.warmup_iters
-    base_lr = args.lr
-    min_lr = args.min_lr
-    start_lr = args.start_lr
-    
-    def get_lr(global_iter):
-        if global_iter < warmup_iters:
-            return start_lr + global_iter * (base_lr - start_lr) / warmup_iters
-        else:
-            t = global_iter - warmup_iters
-            T_max = total_iters - warmup_iters
-            return min_lr + 0.5 * (base_lr - min_lr) * (1 + np.cos(np.pi * t / T_max))
-    
-    def set_lr(optimizer, lr):
-        for param_group in optimizer.param_groups:
-            param_group['lr'] = lr
+    # StepLR Scheduler - simple step decay
+    scheduler = lr_scheduler.StepLR(
+        optimizer, 
+        step_size=args.step_size,
+        gamma=args.gamma
+    )
     
     history = {'train_acc': [], 'val_acc': [], 'train_loss': [], 'val_loss': []}
     best_acc = 0.0
-    global_iter = 0
     
     for epoch in range(1, args.num_epochs + 1):
         net.train()
@@ -155,10 +149,6 @@ def train_loop(net, train_loader, val_X, val_y, args):
         
         pbar = tqdm(train_loader, desc=f'Epoch {epoch}/{args.num_epochs}')
         for query, q_labels, support, s_labels in pbar:
-            # Set LR for this iteration
-            current_lr = get_lr(global_iter)
-            set_lr(optimizer, current_lr)
-            
             optimizer.zero_grad()
             
             B = query.shape[0]
@@ -183,8 +173,11 @@ def train_loop(net, train_loader, val_X, val_y, args):
             
             optimizer.step()
             total_loss += loss.item()
-            global_iter += 1
+            current_lr = optimizer.param_groups[0]['lr']
             pbar.set_postfix(loss=f'{loss.item():.4f}', lr=f'{current_lr:.2e}')
+        
+        # Step scheduler at end of epoch
+        scheduler.step()
         
         train_acc = train_correct / train_total if train_total > 0 else 0
         

@@ -43,9 +43,9 @@ class AblationConfig:
     training_samples_list: List[int] = field(default_factory=lambda: [80, 200, 600, 6000])
     num_epochs: int = 100
     lr: float = 1e-3  # Base LR
-    min_lr: float = 1e-5  # Min LR for cosine
-    start_lr: float = 1e-5  # Start LR for warmup
-    warmup_iters: int = 500  # Warmup iterations
+    step_size: int = 10  # StepLR step size
+    gamma: float = 0.1  # StepLR gamma
+    temperature: float = 0.1  # Similarity temperature
     
     # Episodes
     episode_num_train: int = 100
@@ -106,7 +106,14 @@ ABLATION_SLOT_ATTENTION = {
     'flag': '--slot_attention_mode',
 }
 
-ALL_ABLATIONS = [ABLATION_DUAL_BRANCH, ABLATION_SLOT_REFINEMENT, ABLATION_SLOT_ATTENTION]
+ABLATION_SAFF = {
+    'name': 'saff',
+    'description': 'SAFF Module: Without vs With',
+    'modes': ['without', 'with'],
+    'flag': '--saff_mode',
+}
+
+ALL_ABLATIONS = [ABLATION_DUAL_BRANCH, ABLATION_SLOT_REFINEMENT, ABLATION_SLOT_ATTENTION, ABLATION_SAFF]
 
 
 # =============================================================================
@@ -146,6 +153,9 @@ def run_single_experiment(
         '--project', config.project,
         '--num_epochs', str(config.num_epochs),
         '--lr', str(config.lr),
+        '--step_size', str(config.step_size),
+        '--gamma', str(config.gamma),
+        '--temperature', str(config.temperature),
         '--episode_num_train', str(config.episode_num_train),
         '--episode_num_val', str(config.episode_num_val),
         '--episode_num_test', str(config.episode_num_test),
@@ -270,7 +280,7 @@ def get_args():
     parser = argparse.ArgumentParser(description='Run SMNet ablation studies')
     
     parser.add_argument('--ablation', type=str, default='all',
-                        choices=['dual_branch', 'slot_refinement', 'slot_attention', 'all'],
+                        choices=['dual_branch', 'slot_refinement', 'slot_attention', 'saff', 'all'],
                         help='Which ablation to run')
     
     parser.add_argument('--dataset_path', type=str, default='./scalogram_minh')

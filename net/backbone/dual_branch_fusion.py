@@ -421,48 +421,47 @@ class DualBranchFusion(nn.Module):
         F_proj = Conv1x1(F_cat)            # (B, C, H, W)
         Y = Norm(X + α · F_proj)           # Anchor-guided residual
     
-    Why Local and Global are Complementary:
-        - Local branch captures fine-grained textures, edges, and local patterns
-        - Global branch captures long-range dependencies and holistic structure
-        - Neither can fully substitute the other:
-          * Local alone misses global context → poor class discrimination
-          * Global alone loses fine details → poor intra-class precision
-        - Fusion combines both for robust few-shot representations
-    
-    Role of Anchor-Guided Residual:
-        - Preserves original feature geometry (critical for slot attention)
-        - Prevents information loss during branch processing
-        - Learnable α balances contribution of branch features
-        - Linear residual path enables smooth gradient flow
-    
     Args:
         channels: Number of input/output channels
         d_state: SSM state dimension for global branch (default: 16)
         dilation: Dilation rate for local branch mid-range conv (default: 2)
+        mode: Ablation mode - 'both', 'local_only', 'global_only' (default: 'both')
     """
     
     def __init__(
         self,
         channels: int,
         d_state: int = 16,
-        dilation: int = 2
+        dilation: int = 2,
+        mode: str = 'both'  # Ablation mode
     ):
         super().__init__()
         
         self.channels = channels
+        self.mode = mode
         
         # Branch 1: Local-Mid Spatial & Channel
-        self.local_branch = LocalMidBranch(channels, dilation=dilation)
+        if mode in ['both', 'local_only']:
+            self.local_branch = LocalMidBranch(channels, dilation=dilation)
+        else:
+            self.local_branch = None
         
         # Branch 2: Lightweight VSS Block (optimized for few-shot)
-        self.global_branch = VSSBlock(
-            d_model=channels,
-            d_state=d_state,
-            d_conv=3  # Smaller kernel for short sequences
-        )
+        if mode in ['both', 'global_only']:
+            self.global_branch = VSSBlock(
+                d_model=channels,
+                d_state=d_state,
+                d_conv=3  # Smaller kernel for short sequences
+            )
+        else:
+            self.global_branch = None
         
-        # Fusion: Concat (2C) -> Proj (C)
-        self.fusion_proj = nn.Conv2d(channels * 2, channels, kernel_size=1, bias=False)
+        # Fusion: depends on mode
+        if mode == 'both':
+            self.fusion_proj = nn.Conv2d(channels * 2, channels, kernel_size=1, bias=False)
+        elif mode in ['local_only', 'global_only']:
+            # Single branch: no fusion needed, just identity-like
+            self.fusion_proj = None
         
         # Learnable scaling parameter α
         self.alpha = nn.Parameter(torch.tensor(0.1))
@@ -483,18 +482,22 @@ class DualBranchFusion(nn.Module):
         # === ANCHOR: Keep original input (NO processing) ===
         anchor = x
         
-        # === BRANCH 1: Local-Mid Processing ===
-        f_local = self.local_branch(x)  # (B, C, H, W)
-        
-        # === BRANCH 2: Global Processing ===
-        f_global = self.global_branch(x)  # (B, C, H, W)
-        
-        # === FUSION ===
-        # Concatenate along channel dimension
-        f_cat = torch.cat([f_local, f_global], dim=1)  # (B, 2C, H, W)
-        
-        # Project back to C channels
-        f_proj = self.fusion_proj(f_cat)  # (B, C, H, W)
+        if self.mode == 'both':
+            # === BRANCH 1: Local-Mid Processing ===
+            f_local = self.local_branch(x)  # (B, C, H, W)
+            
+            # === BRANCH 2: Global Processing ===
+            f_global = self.global_branch(x)  # (B, C, H, W)
+            
+            # === FUSION ===
+            f_cat = torch.cat([f_local, f_global], dim=1)  # (B, 2C, H, W)
+            f_proj = self.fusion_proj(f_cat)  # (B, C, H, W)
+            
+        elif self.mode == 'local_only':
+            f_proj = self.local_branch(x) - x  # Get residual of local branch
+            
+        elif self.mode == 'global_only':
+            f_proj = self.global_branch(x) - x  # Get residual of global branch
         
         # === ANCHOR-GUIDED RESIDUAL ===
         # Y = Norm(X + α · Proj(F_cat))
