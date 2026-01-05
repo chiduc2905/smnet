@@ -176,3 +176,26 @@ def compute_class_covariance(
     cov = (centered.T @ centered) / (M - 1 + eps)  # (C, C)
     
     return cov
+
+
+def compute_class_prototype(
+    patches: torch.Tensor
+) -> torch.Tensor:
+    """Compute class prototype (mean vector) from patches.
+    
+    Args:
+        patches: (Shot, N, C) patches from support set
+        
+    Returns:
+        proto: (C,) class prototype vector
+    """
+    if patches.dim() == 3:
+        # Flatten shot and spatial: (Shot, N, C) -> (Shot*N, C)
+        all_patches = patches.reshape(-1, patches.shape[-1])
+    else:
+        all_patches = patches
+    
+    # Mean over all patches
+    proto = all_patches.mean(dim=0)  # (C,)
+    
+    return proto
