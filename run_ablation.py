@@ -42,9 +42,9 @@ class AblationConfig:
     # Training
     training_samples_list: List[int] = field(default_factory=lambda: [80, 200, 600, 6000])
     num_epochs: int = 100
-    lr: float = 1e-3  # Base LR
-    step_size: int = 10  # StepLR step size
-    gamma: float = 0.1  # StepLR gamma
+    lr: float = 1e-3  # Initial LR
+    eta_min: float = 1e-5  # Min LR for CosineAnnealingLR
+    weight_decay: float = 1e-4  # Weight decay
     temperature: float = 0.5  # Similarity temperature
     
     # Episodes
@@ -153,8 +153,8 @@ def run_single_experiment(
         '--project', config.project,
         '--num_epochs', str(config.num_epochs),
         '--lr', str(config.lr),
-        '--step_size', str(config.step_size),
-        '--gamma', str(config.gamma),
+        '--eta_min', str(config.eta_min),
+        '--weight_decay', str(config.weight_decay),
         '--temperature', str(config.temperature),
         '--episode_num_train', str(config.episode_num_train),
         '--episode_num_val', str(config.episode_num_val),

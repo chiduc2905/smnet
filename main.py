@@ -82,18 +82,14 @@ def get_args():
     parser.add_argument('--episode_num_test', type=int, default=150)
     parser.add_argument('--num_epochs', type=int, default=100)
     parser.add_argument('--batch_size', type=int, default=1)
-    parser.add_argument('--lr', type=float, default=1e-3, help='Base learning rate')
-    parser.add_argument('--min_lr', type=float, default=1e-5, help='Min LR for cosine')
-    parser.add_argument('--start_lr', type=float, default=1e-5, help='Start LR for warmup')
-    parser.add_argument('--warmup_iters', type=int, default=500, help='Warmup iterations')
+    parser.add_argument('--lr', type=float, default=1e-3, help='Initial learning rate')
+    parser.add_argument('--eta_min', type=float, default=1e-5, help='Min LR for CosineAnnealingLR')
     parser.add_argument('--temperature', type=float, default=0.5,
                         help='Temperature for similarity scaling (higher=softer)')
     parser.add_argument('--grad_clip', type=float, default=1.0,
                         help='Gradient clipping max norm')
-    parser.add_argument('--step_size', type=int, default=10,
-                        help='StepLR step size (epochs)')
-    parser.add_argument('--gamma', type=float, default=0.1,
-                        help='StepLR gamma (LR multiplier)')
+    parser.add_argument('--weight_decay', type=float, default=1e-4,
+                        help='Weight decay for optimizer')
     parser.add_argument('--seed', type=int, default=42)
     
     # Loss
@@ -102,6 +98,10 @@ def get_args():
     
     # Mode
     parser.add_argument('--mode', type=str, default='train', choices=['train', 'test'])
+    parser.add_argument('--hpo_mode', action='store_true',
+                        help='HPO mode: skip test, output JSON result at end')
+    parser.add_argument('--use_last_checkpoint', action='store_true', default=True,
+                        help='Use final epoch checkpoint for test (proper protocol)')
     
     # WandB
     parser.add_argument('--project', type=str, default='smnet',
@@ -148,18 +148,18 @@ def train_loop(net, train_loader, val_X, val_y, args):
         
     criterion_center = CenterLoss(num_classes=args.way_num, feat_dim=feat_dim, device=device)
     
-    # Optimizer
+    # Optimizer with weight decay
     optimizer = optim.Adam([
         {'params': net.parameters()},
         {'params': criterion_center.parameters()}
-    ], lr=args.lr)
+    ], lr=args.lr, weight_decay=args.weight_decay)
     
-    # StepLR Scheduler - simple step decay
-    # LR = 0.001, gamma = 0.1, step_size = 10 epochs
-    scheduler = lr_scheduler.StepLR(
+    # CosineAnnealingLR Scheduler
+    # LR decays from lr to eta_min over T_max epochs following cosine curve
+    scheduler = lr_scheduler.CosineAnnealingLR(
         optimizer, 
-        step_size=args.step_size,  # Decay every 10 epochs
-        gamma=args.gamma  # Multiply by 0.1
+        T_max=args.num_epochs,  # Full training length
+        eta_min=args.eta_min   # Minimum LR at end
     )
     
     # Training history
@@ -277,6 +277,13 @@ def train_loop(net, train_loader, val_X, val_y, args):
     
     if os.path.exists(f"{curves_path}_curves.png"):
         wandb.log({"training_curves": wandb.Image(f"{curves_path}_curves.png")})
+    
+    # Save final epoch model (for proper protocol)
+    samples_suffix = f'{args.training_samples}samples' if args.training_samples else 'all'
+    final_model_filename = f'{args.dataset_name}_{args.model}_{samples_suffix}_{args.shot_num}shot_final.pth'
+    final_path = os.path.join(args.path_weights, final_model_filename)
+    torch.save(net.state_dict(), final_path)
+    print(f'Final model saved: {final_path}')
     
     return best_acc, history
 
@@ -545,9 +552,40 @@ def main():
     if args.mode == 'train':
         best_acc, history = train_loop(net, train_loader, val_X, val_y, args)
         
-        # Load best model for testing
+        # HPO mode: output JSON result and skip test
+        if args.hpo_mode:
+            import json
+            # Get final val accuracy (last epoch)
+            final_val_acc = history['val_acc'][-1] if history['val_acc'] else 0
+            
+            # Calculate val std from last few epochs
+            if len(history['val_acc']) >= 5:
+                val_std = np.std(history['val_acc'][-5:])
+            else:
+                val_std = np.std(history['val_acc']) if history['val_acc'] else 0
+            
+            result = {
+                'val_acc': final_val_acc,
+                'val_std': val_std,
+                'train_acc': history['train_acc'][-1] if history['train_acc'] else 0,
+                'best_val_acc': max(history['val_acc']) if history['val_acc'] else 0,
+            }
+            print(f"HPO_RESULT:{json.dumps(result)}")
+            wandb.finish()
+            return
+        
+        # Load model for testing
         samples_suffix = f'{args.training_samples}samples' if args.training_samples else 'all'
-        path = os.path.join(args.path_weights, f'{args.dataset_name}_{args.model}_{samples_suffix}_{args.shot_num}shot_best.pth')
+        
+        if args.use_last_checkpoint:
+            # Proper protocol: use final epoch checkpoint
+            path = os.path.join(args.path_weights, f'{args.dataset_name}_{args.model}_{samples_suffix}_{args.shot_num}shot_final.pth')
+            print(f'Testing with FINAL checkpoint (epoch 100): {path}')
+        else:
+            # Legacy: use best validation checkpoint
+            path = os.path.join(args.path_weights, f'{args.dataset_name}_{args.model}_{samples_suffix}_{args.shot_num}shot_best.pth')
+            print(f'Testing with BEST val checkpoint: {path}')
+        
         net.load_state_dict(torch.load(path))
         test_final(net, test_loader, args)
         

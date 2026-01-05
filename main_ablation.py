@@ -65,17 +65,13 @@ def get_args():
     parser.add_argument('--episode_num_test', type=int, default=150)
     parser.add_argument('--num_epochs', type=int, default=100)
     parser.add_argument('--batch_size', type=int, default=1)
-    parser.add_argument('--lr', type=float, default=1e-3, help='Base learning rate')
-    parser.add_argument('--min_lr', type=float, default=1e-5, help='Min LR for cosine')
-    parser.add_argument('--start_lr', type=float, default=1e-5, help='Start LR for warmup')
-    parser.add_argument('--warmup_iters', type=int, default=500, help='Warmup iterations')
+    parser.add_argument('--lr', type=float, default=1e-3, help='Initial learning rate')
+    parser.add_argument('--eta_min', type=float, default=1e-5, help='Min LR for CosineAnnealingLR')
     parser.add_argument('--temperature', type=float, default=0.5,
                         help='Temperature for similarity scaling')
     parser.add_argument('--grad_clip', type=float, default=1.0)
-    parser.add_argument('--step_size', type=int, default=10,
-                        help='StepLR step size (epochs)')
-    parser.add_argument('--gamma', type=float, default=0.1,
-                        help='StepLR gamma (LR multiplier)')
+    parser.add_argument('--weight_decay', type=float, default=1e-4,
+                        help='Weight decay for optimizer')
     parser.add_argument('--seed', type=int, default=42)
     
     # WandB
@@ -130,13 +126,13 @@ def train_loop(net, train_loader, val_X, val_y, args):
     optimizer = optim.Adam([
         {'params': net.parameters()},
         {'params': criterion_center.parameters()}
-    ], lr=args.lr)
+    ], lr=args.lr, weight_decay=args.weight_decay)
     
-    # StepLR Scheduler - simple step decay
-    scheduler = lr_scheduler.StepLR(
+    # CosineAnnealingLR Scheduler
+    scheduler = lr_scheduler.CosineAnnealingLR(
         optimizer, 
-        step_size=args.step_size,
-        gamma=args.gamma
+        T_max=args.num_epochs,
+        eta_min=args.eta_min
     )
     
     history = {'train_acc': [], 'val_acc': [], 'train_loss': [], 'val_loss': []}
@@ -214,6 +210,14 @@ def train_loop(net, train_loader, val_X, val_y, args):
             torch.save(net.state_dict(), path)
             print(f'  → Best model saved ({val_acc:.4f})')
             wandb.run.summary["best_val_acc"] = best_acc
+    
+    # Save final epoch model (proper protocol)
+    samples_suffix = f'{args.training_samples}samples' if args.training_samples else 'all'
+    ablation_suffix = f'{args.ablation_type}_{args.ablation_mode}'
+    final_model_filename = f'{args.dataset_name}_{ablation_suffix}_{samples_suffix}_{args.shot_num}shot_final.pth'
+    final_path = os.path.join(args.path_weights, final_model_filename)
+    torch.save(net.state_dict(), final_path)
+    print(f'Final model saved: {final_path}')
     
     return best_acc, history
 
@@ -408,11 +412,12 @@ def main():
     # Train
     best_acc, history = train_loop(net, train_loader, val_X, val_y, args)
     
-    # Load best and test
+    # Load FINAL checkpoint for testing (proper protocol: use epoch 100)
     samples_suffix = f'{args.training_samples}samples' if args.training_samples else 'all'
     ablation_suffix = f'{args.ablation_type}_{args.ablation_mode}'
-    path = os.path.join(args.path_weights, f'{args.dataset_name}_{ablation_suffix}_{samples_suffix}_{args.shot_num}shot_best.pth')
-    net.load_state_dict(torch.load(path))
+    final_path = os.path.join(args.path_weights, f'{args.dataset_name}_{ablation_suffix}_{samples_suffix}_{args.shot_num}shot_final.pth')
+    print(f'Testing with FINAL checkpoint (epoch 100): {final_path}')
+    net.load_state_dict(torch.load(final_path))
     test_final(net, test_loader, args)
     
     wandb.finish()
