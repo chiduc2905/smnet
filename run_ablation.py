@@ -45,7 +45,7 @@ class AblationConfig:
     lr: float = 1e-3  # Base LR
     step_size: int = 10  # StepLR step size
     gamma: float = 0.1  # StepLR gamma
-    temperature: float = 0.1  # Similarity temperature
+    temperature: float = 0.5  # Similarity temperature
     
     # Episodes
     episode_num_train: int = 100

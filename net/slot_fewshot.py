@@ -58,7 +58,7 @@ class SMNet(nn.Module):
         num_slots: int = 5,
         slot_iters: int = 5,
         num_merging_stages: int = 2,
-        lambda_init: float = 2.0,
+        lambda_init: float = 1.0,
         mask_threshold: Optional[float] = None,
         device: str = 'cuda',
         **kwargs  # For backward compatibility and ablation config
@@ -119,7 +119,7 @@ class SMNet(nn.Module):
         )
         
         # === SAFF Module (conditional) ===
-        temperature = kwargs.get('temperature', 0.1)
+        temperature = kwargs.get('temperature', 0.5)
         
         if self.use_saff:
             self.saff = SAFFModule(

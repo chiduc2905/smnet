@@ -64,7 +64,7 @@ def get_args():
                         help='Number of semantic slots K (paper: 5)')
     parser.add_argument('--slot_iters', type=int, default=5,
                         help='Slot attention iterations (paper: 5)')
-    parser.add_argument('--lambda_init', type=float, default=2.0,
+    parser.add_argument('--lambda_init', type=float, default=1.0,
                         help='Lambda for class-aware refinement (paper: 2.0)')
     
     # Few-shot settings
@@ -86,7 +86,7 @@ def get_args():
     parser.add_argument('--min_lr', type=float, default=1e-5, help='Min LR for cosine')
     parser.add_argument('--start_lr', type=float, default=1e-5, help='Start LR for warmup')
     parser.add_argument('--warmup_iters', type=int, default=500, help='Warmup iterations')
-    parser.add_argument('--temperature', type=float, default=1.0,
+    parser.add_argument('--temperature', type=float, default=0.5,
                         help='Temperature for similarity scaling (higher=softer)')
     parser.add_argument('--grad_clip', type=float, default=1.0,
                         help='Gradient clipping max norm')

@@ -158,8 +158,8 @@ class SAFFModule(nn.Module):
         num_slots: int = 5,
         num_iters: int = 5,
         num_patches: int = 256,
-        lambda_init: float = 2.0,
-        temperature: float = 0.1,  # Temperature for similarity scaling
+        lambda_init: float = 1.0,
+        temperature: float = 0.5,  # Temperature for similarity scaling (higher = softer)
         debug: bool = True  # Enable debug logging
     ):
         super().__init__()
@@ -179,14 +179,14 @@ class SAFFModule(nn.Module):
         )
         
         # Step 2: SCA (Slot Covariance Attention) - slot priority
-        self.sca = SlotCovarianceAttention(dim=dim, temperature=1.0)
+        self.sca = SlotCovarianceAttention(dim=dim, temperature=1.5)
         
         # Step 3: Patch refinement scaling λ
         self.lambda_scale = nn.Parameter(torch.tensor(lambda_init))
         self.patch_norm = nn.LayerNorm(dim)
         
         # Step 4: CMA (Channel Metric Attention) - channel refinement
-        self.cma = ChannelMetricAttention(dim=dim, temperature=1.0, use_residual=True)
+        self.cma = ChannelMetricAttention(dim=dim, temperature=1.5, use_residual=True)
         
         # Step 5: Similarity Classifier (Conv1d based)
         # Matches architecture in few-shot-mamba/net/new_proposed.py
