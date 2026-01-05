@@ -160,7 +160,7 @@ class SAFFModule(nn.Module):
         num_patches: int = 256,
         lambda_init: float = 1.0,
         temperature: float = 0.5,  # Temperature for similarity scaling (higher = softer)
-        debug: bool = True  # Enable debug logging
+        debug: bool = False  # Debug logging disabled by default
     ):
         super().__init__()
         

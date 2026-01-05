@@ -160,20 +160,19 @@ class SMNet(nn.Module):
         # Convert to patches: (B, C, H, W) → (B, N, C)
         patches = rearrange(features, 'b c h w -> b (h w) c')
         
-        # Debug logging for feature extractor (periodic)
-        if self.training and hasattr(self, '_feat_debug_counter'):
-            self._feat_debug_counter += 1
-            if self._feat_debug_counter % 100 == 1:
-                with torch.no_grad():
-                    # Patch statistics
-                    patch_norm = patches.norm(dim=-1)  # (B, N)
-                    patch_mean = patches.mean()
-                    patch_std = patches.std()
-                    print(f"[DEBUG-FEAT] patches: shape={patches.shape}, "
-                          f"mean={patch_mean.item():.4f}, std={patch_std.item():.4f}, "
-                          f"norm_range=[{patch_norm.min().item():.2f}, {patch_norm.max().item():.2f}]")
-        elif self.training and not hasattr(self, '_feat_debug_counter'):
-            self._feat_debug_counter = 0
+        # Debug logging disabled (uncomment to enable)
+        # if self.training and hasattr(self, '_feat_debug_counter'):
+        #     self._feat_debug_counter += 1
+        #     if self._feat_debug_counter % 100 == 1:
+        #         with torch.no_grad():
+        #             patch_norm = patches.norm(dim=-1)
+        #             patch_mean = patches.mean()
+        #             patch_std = patches.std()
+        #             print(f"[DEBUG-FEAT] patches: shape={patches.shape}, "
+        #                   f"mean={patch_mean.item():.4f}, std={patch_std.item():.4f}, "
+        #                   f"norm_range=[{patch_norm.min().item():.2f}, {patch_norm.max().item():.2f}]")
+        # elif self.training and not hasattr(self, '_feat_debug_counter'):
+        #     self._feat_debug_counter = 0
         
         return patches
     
