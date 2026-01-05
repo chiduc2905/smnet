@@ -140,10 +140,11 @@ def train_loop(net, train_loader, val_X, val_y, args):
     criterion_main = ContrastiveLoss().to(device)
     
     # Calculate feature dimension dynamically
+    # SMNet uses extract_features which returns (B, N_patches, hidden_dim)
     with torch.no_grad():
         dummy_input = torch.randn(1, 3, args.image_size, args.image_size).to(device)
-        dummy_slots, _, _, _ = net.encoder(dummy_input)
-        feat_dim = dummy_slots.view(1, -1).size(1)
+        dummy_patches = net.extract_features(dummy_input)  # (1, N, C)
+        feat_dim = dummy_patches.shape[-1]  # hidden_dim
         
     criterion_center = CenterLoss(num_classes=args.way_num, feat_dim=feat_dim, device=device)
     
@@ -203,8 +204,8 @@ def train_loop(net, train_loader, val_X, val_y, args):
             # Center Loss (optional)
             if args.lambda_center > 0:
                 q_flat = query.view(-1, C, H, W)
-                slots, _, _, _ = net.encoder(q_flat)
-                features = slots.view(slots.size(0), -1)
+                patches = net.extract_features(q_flat)  # (NQ, N, C)
+                features = patches.mean(dim=1)  # Global avg pool: (NQ, C)
                 features = F.normalize(features, p=2, dim=1)
                 loss_center = criterion_center(features, targets)
                 loss = loss_main + args.lambda_center * loss_center
@@ -371,8 +372,8 @@ def test_final(net, loader, args):
             
             # Extract features for t-SNE
             q_flat = query.view(-1, C, H, W)
-            slots, _, _, _ = net.encoder(q_flat)
-            feat = slots.view(slots.size(0), -1)
+            patches = net.extract_features(q_flat)  # (NQ, N, C)
+            feat = patches.mean(dim=1)  # Global avg pool: (NQ, C)
             all_features.append(feat.cpu().numpy())
     
     # Metrics
