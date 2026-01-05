@@ -15,6 +15,16 @@ Key design:
 Based on: "Slot Attention-based Feature Filtering for Few-Shot Learning"
 arXiv:2508.09699, CVPR 2025 Workshop
 """
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from typing import Tuple, List, Optional
+
+from net.backbone.slot_covariance_attention import (
+    SlotCovarianceAttention, compute_class_covariance, compute_class_prototype
+)
+from net.backbone.channel_metric_attention import ChannelMetricAttention
+
 try:
     from mamba_ssm import Mamba
     MAMBA_AVAILABLE = True
