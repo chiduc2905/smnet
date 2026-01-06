@@ -103,11 +103,11 @@ def get_args():
                         help='HPO mode: skip test, output JSON result at end')
     
     # Checkpoint selection for testing
-    parser.add_argument('--checkpoint_mode', type=str, default='avg',
+    parser.add_argument('--checkpoint_mode', type=str, default='best',
                         choices=['best', 'avg', 'final'],
                         help='Checkpoint to use for testing: best (single best val), avg (top-k averaged), final (last epoch)')
     parser.add_argument('--top_k_avg', type=int, default=5,
-                        help='Number of top checkpoints to average (default: 5)')
+                        help='Number of top checkpoints to average (only used when checkpoint_mode=avg)')
     
     # WandB
     parser.add_argument('--project', type=str, default='smnet',

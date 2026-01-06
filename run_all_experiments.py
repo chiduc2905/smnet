@@ -51,9 +51,8 @@ def run_experiment(model, shot, samples, dataset_path, dataset_name, project):
         '--episode_num_train', '100',
         '--episode_num_val', '150',
         '--episode_num_test', '150',
-        # Top-K model averaging
-        '--checkpoint_mode', 'avg',
-        '--top_k_avg', '5',
+        # Use best validation checkpoint
+        '--checkpoint_mode', 'best',
     ]
     
     if samples is not None:
