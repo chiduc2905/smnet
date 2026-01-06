@@ -102,13 +102,6 @@ def get_args():
     parser.add_argument('--hpo_mode', action='store_true',
                         help='HPO mode: skip test, output JSON result at end')
     
-    # Checkpoint selection for testing
-    parser.add_argument('--checkpoint_mode', type=str, default='best',
-                        choices=['best', 'avg', 'final'],
-                        help='Checkpoint to use for testing: best (single best val), avg (top-k averaged), final (last epoch)')
-    parser.add_argument('--top_k_avg', type=int, default=5,
-                        help='Number of top checkpoints to average (only used when checkpoint_mode=avg)')
-    
     # WandB
     parser.add_argument('--project', type=str, default='smnet',
                         help='WandB project name')
@@ -181,11 +174,6 @@ def train_loop(net, train_loader, val_X, val_y, args):
     }
     
     best_acc = 0.0
-    
-    # Top-K checkpoint tracking for model averaging
-    # Each entry: (val_acc, epoch, state_dict_copy)
-    top_k = getattr(args, 'top_k_avg', 5)  # Default: average top 5 checkpoints
-    top_k_checkpoints = []  # Sorted by val_acc (ascending), so worst is first
     
     for epoch in range(1, args.num_epochs + 1):
         net.train()
@@ -268,20 +256,9 @@ def train_loop(net, train_loader, val_X, val_y, args):
             best_model_filename = f'{args.dataset_name}_{args.model}_{samples_suffix}_{args.shot_num}shot_best.pth'
             best_path = os.path.join(args.path_weights, best_model_filename)
             torch.save(net.state_dict(), best_path)
-            print(f'  ★ New best val acc: {val_acc:.4f} (saved)')
+            print(f'New best: {val_acc:.4f}')
         
-        # Update Top-K checkpoints for averaging
-        current_state = copy.deepcopy(net.state_dict())  # Deep copy to avoid reference issues
-        
-        if len(top_k_checkpoints) < top_k:
-            # Haven't filled top_k yet, just add
-            top_k_checkpoints.append((val_acc, epoch, current_state))
-            top_k_checkpoints.sort(key=lambda x: x[0])  # Sort by val_acc ascending
-        elif val_acc > top_k_checkpoints[0][0]:
-            # Better than worst in top_k, replace it
-            top_k_checkpoints[0] = (val_acc, epoch, current_state)
-            top_k_checkpoints.sort(key=lambda x: x[0])  # Re-sort
-        
+
         print(f'Epoch {epoch}: Loss={avg_loss:.4f}, Train={train_acc:.4f}, Val={val_acc:.4f} (gap={train_val_gap:+.4f})')
         
         # Log to WandB
@@ -305,39 +282,7 @@ def train_loop(net, train_loader, val_X, val_y, args):
     if os.path.exists(f"{curves_path}_curves.png"):
         wandb.log({"training_curves": wandb.Image(f"{curves_path}_curves.png")})
     
-    # Create averaged model from Top-K checkpoints
-    samples_suffix = f'{args.training_samples}samples' if args.training_samples else 'all'
-    
-    if len(top_k_checkpoints) > 0:
-        print(f'\n--- Top-{len(top_k_checkpoints)} Checkpoint Averaging ---')
-        for i, (acc, ep, _) in enumerate(sorted(top_k_checkpoints, key=lambda x: -x[0])):
-            print(f'  #{i+1}: Epoch {ep} → Val Acc = {acc:.4f}')
-        
-        # Average weights
-        avg_state_dict = {}
-        for key in top_k_checkpoints[0][2].keys():
-            # Stack tensors from all checkpoints and take mean
-            stacked = torch.stack([ckpt[2][key].float() for _, _, ckpt in top_k_checkpoints])
-            avg_state_dict[key] = stacked.mean(dim=0)
-        
-        # Save averaged model
-        avg_model_filename = f'{args.dataset_name}_{args.model}_{samples_suffix}_{args.shot_num}shot_avg{len(top_k_checkpoints)}.pth'
-        avg_path = os.path.join(args.path_weights, avg_model_filename)
-        torch.save(avg_state_dict, avg_path)
-        print(f'Averaged model saved: {avg_path}')
-        
-        # Calculate mean val_acc of top-k for reference
-        mean_val_acc = sum(acc for acc, _, _ in top_k_checkpoints) / len(top_k_checkpoints)
-        print(f'Mean val acc of Top-{len(top_k_checkpoints)}: {mean_val_acc:.4f}')
-        wandb.log({"top_k_mean_val_acc": mean_val_acc})
-    
-    # Also save final epoch model
-    final_model_filename = f'{args.dataset_name}_{args.model}_{samples_suffix}_{args.shot_num}shot_final.pth'
-    final_path = os.path.join(args.path_weights, final_model_filename)
-    torch.save(net.state_dict(), final_path)
-    print(f'Final model saved: {final_path}')
-    
-    return best_acc, history, top_k_checkpoints
+    return best_acc, history
 
 
 def evaluate(net, loader, args, criterion_main=None):
@@ -602,7 +547,7 @@ def main():
     wandb.log({"model/total_parameters": total_params, "model/trainable_parameters": trainable_params})
     
     if args.mode == 'train':
-        best_acc, history, top_k_checkpoints = train_loop(net, train_loader, val_X, val_y, args)
+        best_acc, history = train_loop(net, train_loader, val_X, val_y, args)
         
         # HPO mode: output JSON result and skip test
         if args.hpo_mode:
@@ -616,35 +561,20 @@ def main():
             else:
                 val_std = np.std(history['val_acc']) if history['val_acc'] else 0
             
-            # Calculate mean val_acc of top-k checkpoints
-            top_k_mean = sum(acc for acc, _, _ in top_k_checkpoints) / len(top_k_checkpoints) if top_k_checkpoints else 0
-            
             result = {
                 'val_acc': final_val_acc,
                 'val_std': val_std,
                 'train_acc': history['train_acc'][-1] if history['train_acc'] else 0,
-                'best_val_acc': max(history['val_acc']) if history['val_acc'] else 0,
-                'top_k_mean_val_acc': top_k_mean,
+                'best_val_acc': best_acc,
             }
             print(f"HPO_RESULT:{json.dumps(result)}")
             wandb.finish()
             return
         
-        # Load model for testing based on checkpoint_mode
+        # Load best checkpoint for testing
         samples_suffix = f'{args.training_samples}samples' if args.training_samples else 'all'
-        
-        if args.checkpoint_mode == 'avg':
-            # Use averaged top-k checkpoint (recommended for stability)
-            path = os.path.join(args.path_weights, f'{args.dataset_name}_{args.model}_{samples_suffix}_{args.shot_num}shot_avg{args.top_k_avg}.pth')
-            print(f'Testing with AVERAGED Top-{args.top_k_avg} checkpoint: {path}')
-        elif args.checkpoint_mode == 'best':
-            # Use single best validation checkpoint
-            path = os.path.join(args.path_weights, f'{args.dataset_name}_{args.model}_{samples_suffix}_{args.shot_num}shot_best.pth')
-            print(f'Testing with BEST val checkpoint: {path}')
-        else:  # 'final'
-            # Use final epoch checkpoint
-            path = os.path.join(args.path_weights, f'{args.dataset_name}_{args.model}_{samples_suffix}_{args.shot_num}shot_final.pth')
-            print(f'Testing with FINAL checkpoint (epoch {args.num_epochs}): {path}')
+        path = os.path.join(args.path_weights, f'{args.dataset_name}_{args.model}_{samples_suffix}_{args.shot_num}shot_best.pth')
+        print(f'Testing with BEST checkpoint: {path}')
         
         net.load_state_dict(torch.load(path))
         test_final(net, test_loader, args)

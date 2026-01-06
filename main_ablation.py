@@ -190,6 +190,16 @@ def train_loop(net, train_loader, val_X, val_y, args):
         history['train_loss'].append(avg_loss)
         history['val_loss'].append(val_loss if val_loss else 0.0)
         
+        # Save best model
+        samples_suffix = f'{args.training_samples}samples' if args.training_samples else 'all'
+        ablation_suffix = f'{args.ablation_type}_{args.ablation_mode}'
+        if val_acc > best_acc:
+            best_acc = val_acc
+            best_model_filename = f'{args.dataset_name}_{ablation_suffix}_{samples_suffix}_{args.shot_num}shot_best.pth'
+            best_path = os.path.join(args.path_weights, best_model_filename)
+            torch.save(net.state_dict(), best_path)
+            print(f'New best: {val_acc:.4f}')
+        
         print(f'Epoch {epoch}: Loss={avg_loss:.4f}, Train={train_acc:.4f}, Val={val_acc:.4f}')
         
         wandb.log({
@@ -200,14 +210,6 @@ def train_loop(net, train_loader, val_X, val_y, args):
             "accuracy/val": val_acc,
             "lr": optimizer.param_groups[0]['lr']
         })
-    
-    # Save final epoch model (proper protocol)
-    samples_suffix = f'{args.training_samples}samples' if args.training_samples else 'all'
-    ablation_suffix = f'{args.ablation_type}_{args.ablation_mode}'
-    final_model_filename = f'{args.dataset_name}_{ablation_suffix}_{samples_suffix}_{args.shot_num}shot_final.pth'
-    final_path = os.path.join(args.path_weights, final_model_filename)
-    torch.save(net.state_dict(), final_path)
-    print(f'Final model saved: {final_path}')
     
     return best_acc, history
 
@@ -402,12 +404,12 @@ def main():
     # Train
     best_acc, history = train_loop(net, train_loader, val_X, val_y, args)
     
-    # Load FINAL checkpoint for testing (proper protocol: use epoch 100)
+    # Load BEST checkpoint for testing
     samples_suffix = f'{args.training_samples}samples' if args.training_samples else 'all'
     ablation_suffix = f'{args.ablation_type}_{args.ablation_mode}'
-    final_path = os.path.join(args.path_weights, f'{args.dataset_name}_{ablation_suffix}_{samples_suffix}_{args.shot_num}shot_final.pth')
-    print(f'Testing with FINAL checkpoint (epoch 100): {final_path}')
-    net.load_state_dict(torch.load(final_path))
+    best_path = os.path.join(args.path_weights, f'{args.dataset_name}_{ablation_suffix}_{samples_suffix}_{args.shot_num}shot_best.pth')
+    print(f'Testing with BEST checkpoint: {best_path}')
+    net.load_state_dict(torch.load(best_path))
     test_final(net, test_loader, args)
     
     wandb.finish()

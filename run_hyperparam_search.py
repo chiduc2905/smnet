@@ -196,7 +196,7 @@ def grid_search(config: HPOConfig, grid_name: str) -> Dict:
             best_val = val_acc
             best_value = value
     
-    print(f"\n★ Best: {grid_name}={best_value} → {best_val:.4f}")
+    print(f"\nBest: {grid_name}={best_value} -> {best_val:.4f}")
     print('='*60)
     
     return results
