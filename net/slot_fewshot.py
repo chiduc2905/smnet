@@ -2,19 +2,14 @@
 
 Architecture (RGB 64×64 with Dual-Path Residual):
 - Backbone: PatchEmbed + PatchMerging (M1→M2)
-- Path A: GAP + cosine (similarity-only, no learnable params)
+- Path A: GAP + cosine (similarity-only, NO gradient through backbone)
 - Path B: DualBranch + SAFF (slot-based refinement)
 - Fusion: score = s_A + λ * s_B (λ learnable)
 
-Pipeline:
-    Input:       (B, 3, 64, 64)    ← RGB
-    PatchEmbed:  (B, 32, 64, 64)   ← M1
-    Merge1-2:    (B, 128, 16, 16)  ← M2 (256 patches)
-    
-    Path A: GAP(M2) → normalize → cosine → s_A
-    Path B: DualBranch(M2) → SAFF → cosine → s_B
-    
-    Fusion: s_A + λ * s_B
+CRITICAL FIXES:
+1. Path A uses .detach() to stop gradient through backbone
+2. SAFF applies mask to SIMILARITY, not to FEATURES
+3. Scale normalization for s_B before fusion
 """
 import torch
 import torch.nn as nn
@@ -31,7 +26,7 @@ class SMNet(nn.Module):
     """SMNet: Slot Mamba Network with Dual-Path Residual for few-shot classification.
     
     Architecture:
-        Path A: Backbone (M2) → GAP → cosine similarity (anchor)
+        Path A: Backbone (M2).detach() → GAP → cosine similarity (anchor, NO gradient)
         Path B: Backbone (M2) → DualBranch → SAFF → similarity (refiner)
         Fusion: score = s_A + λ * s_B
     
@@ -42,7 +37,6 @@ class SMNet(nn.Module):
         slot_iters: Number of slot attention iterations (default: 5)
         num_merging_stages: Number of PatchMerging2D stages (default: 2)
         lambda_init: Initial value for residual scaling λ (default: 0.3)
-        mask_threshold: Threshold for binary masking (default: None for weighted)
         device: Device to use
     """
     
@@ -64,6 +58,10 @@ class SMNet(nn.Module):
         self.num_slots = num_slots
         self.device = device
         
+        # Debug mode for logging s_A vs s_B scales
+        self.debug_mode = kwargs.get('debug_mode', False)
+        self._debug_counter = 0
+        
         # === Ablation Config ===
         ablation_type = kwargs.get('ablation_type', None)
         ablation_mode = kwargs.get('ablation_mode', None)
@@ -79,7 +77,6 @@ class SMNet(nn.Module):
         # === Backbone (M1 + M2) ===
         
         # Stage 1: Overlapping Patch Embedding (M1)
-        # (B, 3, 64, 64) → (B, base_dim, 64, 64)
         self.patch_embed = PatchEmbed2D(
             in_channels=in_channels,
             embed_dim=base_dim,
@@ -88,7 +85,6 @@ class SMNet(nn.Module):
         )
         
         # Stage 2: Hierarchical PatchMerging2D (M2)
-        # Each stage: spatial /2, channels ×2
         self.merging_stages = nn.ModuleList()
         current_dim = base_dim
         
@@ -102,7 +98,6 @@ class SMNet(nn.Module):
         self.hidden_dim = current_dim
         
         # Number of patches after merging
-        # 64→32→16, so num_patches = 16×16 = 256
         self.num_patches = (64 // (2 ** num_merging_stages)) ** 2
         
         # === Path B: DualBranch + SAFF ===
@@ -110,7 +105,7 @@ class SMNet(nn.Module):
             channels=self.hidden_dim,
             d_state=16,
             dilation=2,
-            mode=dual_branch_mode  # 'both', 'local_only', 'global_only'
+            mode=dual_branch_mode
         )
         
         # Temperature for Path A cosine similarity
@@ -123,7 +118,7 @@ class SMNet(nn.Module):
                 num_slots=num_slots,
                 num_iters=slot_iters,
                 num_patches=self.num_patches,
-                lambda_init=1.0,  # Internal SAFF lambda
+                lambda_init=1.0,
                 temperature=temperature
             )
         else:
@@ -137,8 +132,6 @@ class SMNet(nn.Module):
     
     def extract_backbone_features(self, x: torch.Tensor) -> torch.Tensor:
         """Extract features from backbone (M1 + M2) BEFORE DualBranch.
-        
-        This is used for Path A (similarity-only path).
         
         Args:
             x: (B, C, H, W) input images
@@ -157,8 +150,6 @@ class SMNet(nn.Module):
     
     def extract_features(self, x: torch.Tensor) -> torch.Tensor:
         """Extract patch features using full backbone + DualBranch.
-        
-        This is used for Path B (SAFF path).
         
         Args:
             x: (B, C, H, W) input images
@@ -184,14 +175,14 @@ class SMNet(nn.Module):
     ) -> torch.Tensor:
         """Compute Path A scores: simple GAP + cosine similarity.
         
-        NO learnable parameters - pure similarity anchor.
+        🔥 CRITICAL: Features are DETACHED - no gradient through backbone!
         
         Args:
-            query_features: (NQ, C, H, W) query features from M2
-            support_features_list: List of (Shot, C, H, W) support features per class
+            query_features: (NQ, C, H, W) query features from M2 (DETACHED)
+            support_features_list: List of (Shot, C, H, W) support features per class (DETACHED)
             
         Returns:
-            scores: (NQ, Way) similarity scores
+            scores: (NQ, Way) similarity scores (no gradient to backbone)
         """
         NQ = query_features.shape[0]
         Way = len(support_features_list)
@@ -222,9 +213,9 @@ class SMNet(nn.Module):
     def forward(self, query: torch.Tensor, support: torch.Tensor) -> torch.Tensor:
         """Compute few-shot classification scores using Dual-Path.
         
-        Path A: Backbone → GAP → cosine (anchor)
+        Path A: Backbone.detach() → GAP → cosine (anchor, NO gradient)
         Path B: Backbone → DualBranch → SAFF (refiner)
-        Fusion: score = s_A + λ * s_B
+        Fusion: score = s_A + λ * normalize(s_B)
         
         Args:
             query: (B, NQ, C, H, W) query images
@@ -242,29 +233,36 @@ class SMNet(nn.Module):
             # === Extract Query Features ===
             q_b = query[b]  # (NQ, C, H, W)
             
-            # Path A: Backbone features (before DualBranch)
+            # Backbone features (shared computation)
             q_backbone = self.extract_backbone_features(q_b)  # (NQ, 128, 16, 16)
             
-            # Path B: Full features (with DualBranch)
-            q_patches = self.extract_features(q_b)  # (NQ, N, hidden_dim)
+            # 🔥 FIX 1: DETACH for Path A - no gradient through backbone!
+            q_backbone_detached = q_backbone.detach()
+            
+            # Path B: Full features (with DualBranch) - gradient flows here
+            q_dual = self.dual_branch(q_backbone)  # (NQ, 128, 16, 16)
+            q_patches = rearrange(q_dual, 'b c h w -> b (h w) c')  # (NQ, N, C)
             
             # === Extract Support Features per Class ===
-            support_backbone_list = []  # For Path A
+            support_backbone_list = []  # For Path A (detached)
             support_patches_list = []    # For Path B
             
             for w in range(Way):
                 s_class = support[b, w]  # (Shot, C, H, W)
                 
-                # Path A: Backbone features
+                # Backbone features
                 s_backbone = self.extract_backbone_features(s_class)  # (Shot, 128, 16, 16)
-                support_backbone_list.append(s_backbone)
+                
+                # 🔥 FIX 1: DETACH for Path A
+                support_backbone_list.append(s_backbone.detach())
                 
                 # Path B: Full features
-                s_patches = self.extract_features(s_class)  # (Shot, N, hidden_dim)
+                s_dual = self.dual_branch(s_backbone)
+                s_patches = rearrange(s_dual, 'b c h w -> b (h w) c')
                 support_patches_list.append(s_patches)
             
-            # === Path A: Similarity-only (anchor) ===
-            s_A = self._compute_path_a_scores(q_backbone, support_backbone_list)  # (NQ, Way)
+            # === Path A: Similarity-only (anchor, NO gradient) ===
+            s_A = self._compute_path_a_scores(q_backbone_detached, support_backbone_list)  # (NQ, Way)
             
             # === Path B: SAFF (refiner) ===
             if self.use_saff:
@@ -273,11 +271,22 @@ class SMNet(nn.Module):
                     support_patches_list=support_patches_list
                 )  # (NQ, Way)
             else:
-                # If SAFF disabled, use simple cosine (same as Path A but with DualBranch features)
                 s_B = self._simple_cosine_forward(q_patches, support_patches_list)
             
-            # === Fusion: s_A + λ * s_B ===
-            scores = s_A + self.residual_lambda * s_B  # (NQ, Way)
+            # 🔥 FIX 2: Normalize s_B to prevent scale domination
+            s_B_normalized = s_B / (s_B.std() + 1e-6)
+            
+            # === Debug logging ===
+            if self.training and self.debug_mode:
+                self._debug_counter += 1
+                if self._debug_counter % 50 == 1:
+                    print(f"[DEBUG] |s_A|={s_A.abs().mean().item():.4f}, "
+                          f"|s_B|={s_B.abs().mean().item():.4f}, "
+                          f"|s_B_norm|={s_B_normalized.abs().mean().item():.4f}, "
+                          f"λ={self.residual_lambda.item():.4f}")
+            
+            # === Fusion: s_A + λ * s_B_normalized ===
+            scores = s_A + self.residual_lambda * s_B_normalized  # (NQ, Way)
             
             scores_list.append(scores)
         
@@ -291,52 +300,30 @@ class SMNet(nn.Module):
         query_patches: torch.Tensor, 
         support_patches_list: List[torch.Tensor]
     ) -> torch.Tensor:
-        """Simple prototype-based cosine similarity (when SAFF disabled).
-        
-        Args:
-            query_patches: (NQ, N, C) query patch embeddings
-            support_patches_list: List of (Shot, N, C) support patches per class
-            
-        Returns:
-            scores: (NQ, Way) similarity scores
-        """
+        """Simple prototype-based cosine similarity (when SAFF disabled)."""
         NQ, N, C = query_patches.shape
         Way = len(support_patches_list)
         
-        # Global average pooling for query: (NQ, N, C) -> (NQ, C)
-        q_proto = query_patches.mean(dim=1)  # (NQ, C)
-        q_norm = F.normalize(q_proto, dim=-1)  # (NQ, C)
+        q_proto = query_patches.mean(dim=1)
+        q_norm = F.normalize(q_proto, dim=-1)
         
         scores = []
         for w in range(Way):
-            s_patches = support_patches_list[w]  # (Shot, N, C)
-            # Global average pooling: (Shot, N, C) -> (Shot, C) -> (C,)
-            s_proto = s_patches.mean(dim=(0, 1))  # (C,)
-            s_norm = F.normalize(s_proto, dim=-1)  # (C,)
+            s_patches = support_patches_list[w]
+            s_proto = s_patches.mean(dim=(0, 1))
+            s_norm = F.normalize(s_proto, dim=-1)
             
-            # Cosine similarity: (NQ, C) @ (C,) -> (NQ,)
             sim = torch.einsum('qc,c->q', q_norm, s_norm)
-            # Temperature scaling
             sim = sim / self.temperature
             scores.append(sim)
         
-        # Stack: (NQ, Way)
         scores = torch.stack(scores, dim=1)
         return scores
     
     def get_slot_features(self, images: torch.Tensor) -> tuple:
-        """Extract slot features for visualization.
-        
-        Args:
-            images: (B, C, H, W) input images
-            
-        Returns:
-            slots: (B, K, hidden_dim) slot descriptors
-            attn: (B, K, N) attention weights
-        """
+        """Extract slot features for visualization."""
         patches = self.extract_features(images)
         if self.saff is not None:
-            # Need to provide dummy class stats for encode
             from net.backbone.slot_covariance_attention import compute_class_covariance, compute_class_prototype
             class_cov = compute_class_covariance(patches)
             class_proto = compute_class_prototype(patches)

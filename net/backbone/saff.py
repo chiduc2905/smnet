@@ -1,19 +1,14 @@
-"""SAFF Module with SCA + CMA Integration.
+"""SAFF Module with Similarity-based Masking.
 
-Architecture (combining SAFF + SCA + CMA):
+CRITICAL FIX: Mask is applied to SIMILARITY, NOT to FEATURES.
+This prevents SAFF from being a "hidden classifier" that overfits.
+
+Architecture:
     1. SlotAttention: Extract K slots from patches
-    2. SCA (SlotCovarianceAttention): Compute slot priority α_k via covariance matching
-    3. SAFF-style Patch Refinement: mask = Σ_k attn[k,i] * α_k
-    4. CMA (ChannelMetricAttention): Channel-level slot refinement  
-    5. Similarity: Cosine + MLP → Score
-
-Key design:
-    - SAFF handles patch-level refinement
-    - SCA handles slot-level priority (replaces simple cosine filtering)
-    - CMA handles channel-level refinement (after SAFF, not before)
-    
-Based on: "Slot Attention-based Feature Filtering for Few-Shot Learning"
-arXiv:2508.09699, CVPR 2025 Workshop
+    2. SCA (SlotCovarianceAttention): Compute slot priority α_k
+    3. Compute raw patch-to-patch similarity
+    4. Apply mask to SIMILARITY (MatchingNet-style refinement)
+    5. Conv1D → Final Score
 """
 import torch
 import torch.nn as nn
@@ -37,12 +32,6 @@ class SAFFSlotAttention(nn.Module):
     
     Iteratively refines slots to bind to different parts of input patches.
     Uses Mamba for slot update and interaction.
-    
-    Args:
-        dim: Feature dimension
-        num_slots: Number of slots K
-        num_iters: Number of refinement iterations
-        eps: Epsilon for numerical stability
     """
     
     def __init__(
@@ -75,12 +64,11 @@ class SAFFSlotAttention(nn.Module):
         self.to_v = nn.Linear(dim, dim, bias=False)
         
         # Mamba for slot update (replaces GRU)
-        # Processes sequence of K slots
         self.mamba = Mamba(
             d_model=dim,
             d_state=16,
             d_conv=4,
-            expand=1  # Lightweight
+            expand=1
         )
         self.norm_mamba = nn.LayerNorm(dim)
         
@@ -97,7 +85,7 @@ class SAFFSlotAttention(nn.Module):
         """
         B, N, C = patches.shape
         
-        # Initialize slots (with learnable parameters + noise)
+        # Initialize slots
         slots = self.slots_mu.expand(B, self.num_slots, -1)
         slots = slots + self.slots_sigma * torch.randn_like(slots)
         
@@ -105,8 +93,8 @@ class SAFFSlotAttention(nn.Module):
         patches_norm = self.norm_input(patches)
         
         # Keys and values from patches
-        k = self.to_k(patches_norm)  # (B, N, C)
-        v = self.to_v(patches_norm)  # (B, N, C)
+        k = self.to_k(patches_norm)
+        v = self.to_v(patches_norm)
         
         attn = None
         
@@ -114,42 +102,37 @@ class SAFFSlotAttention(nn.Module):
             slots_prev = slots
             slots = self.norm_slots(slots)
             
-            # Query from slots
-            q = self.to_q(slots)  # (B, K, C)
+            q = self.to_q(slots)
             
             # Attention: slots query patches
             dots = torch.einsum('bkc,bnc->bkn', q, k) * self.scale
             
             # Softmax over slots (competition for patches)
-            attn = F.softmax(dots, dim=1)  # (B, K, N)
+            attn = F.softmax(dots, dim=1)
             
             # Weighted mean of values
             attn_weights = attn / (attn.sum(dim=-1, keepdim=True) + self.eps)
             updates = torch.einsum('bkn,bnc->bkc', attn_weights, v)
             
-            # Mamba update: Refine slots based on updates
-            # 1. Residual addition of updates (Gradient-like step)
+            # Mamba update
             slots = slots_prev + updates
-            
-            # 2. Mamba mixing (Slot interaction and refinement)
-            # Normalize before Mamba
             slots = slots + self.mamba(self.norm_mamba(slots))
         
         return slots, attn
 
 
 class SAFFModule(nn.Module):
-    """SAFF Module with SCA + CMA Integration.
+    """SAFF Module with Similarity-based Masking.
     
-    Complete pipeline:
-        SlotAttention → SCA → Patch Refinement → CMA → Similarity
+    🔥 CRITICAL FIX: Mask is applied to SIMILARITY, NOT to FEATURES.
     
-    Args:
-        dim: Feature dimension
-        num_slots: Number of slots K (default: 5)
-        num_iters: Slot attention iterations (default: 5)
-        num_patches: Number of patches N (default: 256)
-        lambda_init: Residual scaling for patch refinement (default: 2.0)
+    Pipeline:
+        1. SlotAttention → slots, attn
+        2. SCA → α_k (slot priority)
+        3. Compute attention mask from attn * α
+        4. Compute raw patch-to-patch cosine similarity
+        5. Apply mask to similarity: masked_sim = mask * sim
+        6. Aggregate → score
     """
     
     def __init__(
@@ -159,7 +142,7 @@ class SAFFModule(nn.Module):
         num_iters: int = 5,
         num_patches: int = 256,
         lambda_init: float = 1.0,
-        temperature: float = 0.5  # Temperature for similarity scaling (higher = softer)
+        temperature: float = 0.5
     ):
         super().__init__()
         
@@ -178,19 +161,13 @@ class SAFFModule(nn.Module):
         # Step 2: SCA (Slot Covariance Attention) - slot priority
         self.sca = SlotCovarianceAttention(dim=dim, temperature=1.5)
         
-        # Step 3: Patch refinement scaling λ
-        self.lambda_scale = nn.Parameter(torch.tensor(lambda_init))
-        self.patch_norm = nn.LayerNorm(dim)
-        
-        # Step 4: CMA (Channel Metric Attention) - channel refinement
+        # Step 3: CMA (Channel Metric Attention) - optional channel refinement
         self.cma = ChannelMetricAttention(dim=dim, temperature=1.5, use_residual=True)
         
-        # Step 5: Similarity Classifier (Conv1d based)
-        # Matches architecture in few-shot-mamba/net/new_proposed.py
-        # Input: (NQ, 1, N) -> Output (NQ, 1, 1) -> Squeeze
+        # Similarity aggregation (Conv1d based)
         self.classifier1 = nn.Sequential(
             nn.LeakyReLU(0.2, True),
-            nn.Dropout(0.5),  # Default dropout p=0.5 as in reference
+            nn.Dropout(0.5),
             nn.Conv1d(1, 1, kernel_size=num_patches, stride=num_patches, bias=True)
         )
     
@@ -201,7 +178,7 @@ class SAFFModule(nn.Module):
     ) -> torch.Tensor:
         """Compute combined attention mask from slot attention and slot priority.
         
-        SAFF-style: mask_i = Σ_k attn[k,i] * α_k
+        mask_i = Σ_k attn[k,i] * α_k
         
         Args:
             attn: (B, K, N) slot attention weights
@@ -210,11 +187,7 @@ class SAFFModule(nn.Module):
         Returns:
             mask: (B, N) patch-level attention mask
         """
-        # alpha: (B, K) → (B, K, 1)
         alpha_expanded = alpha.unsqueeze(-1)  # (B, K, 1)
-        
-        # mask_i = Σ_k attn[k,i] * α_k
-        # (B, K, N) * (B, K, 1) → sum over K → (B, N)
         mask = (attn * alpha_expanded).sum(dim=1)  # (B, N)
         
         # Normalize to [0, 1]
@@ -222,106 +195,72 @@ class SAFFModule(nn.Module):
         
         return mask
     
-    def refine_patches(
-        self,
-        patches: torch.Tensor,
-        mask: torch.Tensor
-    ) -> torch.Tensor:
-        """SAFF-style patch refinement.
-        
-        refined_patch = patch + λ * (mask * patch)
-        
-        Args:
-            patches: (B, N, C) original patches
-            mask: (B, N) attention mask
-            
-        Returns:
-            refined: (B, N, C) refined patches
-        """
-        masked = mask.unsqueeze(-1) * patches  # (B, N, C)
-        refined = patches + self.lambda_scale * masked
-        refined = self.patch_norm(refined)
-        return refined
-    
-    def compute_similarity(
+    def compute_masked_similarity(
         self,
         query_patches: torch.Tensor,
-        support_patches: torch.Tensor
+        support_patches: torch.Tensor,
+        query_mask: torch.Tensor,
+        support_mask: torch.Tensor
     ) -> torch.Tensor:
-        """Compute patch-to-patch similarity.
+        """Compute similarity with mask applied to SIMILARITY, not features.
+        
+        🔥 CRITICAL: MatchingNet-style refinement
+        
+        sim_patch = cosine(q_patch, s_patch)
+        scored_sim = mask * sim_patch
+        score = aggregate(scored_sim)
         
         Args:
-            query_patches: (NQ, N, C) refined query patches
-            support_patches: (Shot, N, C) refined support patches
+            query_patches: (NQ, N, C) query patches (RAW, not refined)
+            support_patches: (Shot, N, C) support patches (RAW, not refined)
+            query_mask: (NQ, N) attention mask for query
+            support_mask: (Shot, N) attention mask for support
             
         Returns:
-            similarity: (NQ,) scores
+            score: (NQ,) similarity scores
         """
         NQ, N, C = query_patches.shape
+        Shot = support_patches.shape[0]
         
-        # Normalize
-        q_norm = F.normalize(query_patches, dim=-1)
-        s_norm = F.normalize(support_patches, dim=-1)
+        # Normalize patches for cosine similarity
+        q_norm = F.normalize(query_patches, dim=-1)  # (NQ, N, C)
+        s_norm = F.normalize(support_patches, dim=-1)  # (Shot, N, C)
         
         # Average support across shots
         s_avg = s_norm.mean(dim=0)  # (N, C)
+        s_mask_avg = support_mask.mean(dim=0)  # (N,)
         
-        # Similarity matrix: (NQ, N, N)
-        sim_matrix = torch.einsum('qnc,mc->qnm', q_norm, s_avg)
+        # Patch-to-patch similarity: (NQ, N, N)
+        # sim[q, i, j] = cosine(q_patch_i, s_patch_j)
+        sim_matrix = torch.einsum('qic,jc->qij', q_norm, s_avg)
         
-        # Temperature scaling - amplify gradients
+        # Temperature scaling
         sim_matrix = sim_matrix / self.temperature
         
-        # Max over support patches for each query patch
-        max_sim = sim_matrix.max(dim=-1)[0]  # (NQ, N)
+        # Apply masks to similarity
+        # Combined mask: query_mask * support_mask^T
+        # mask_combined[q, i, j] = query_mask[q, i] * support_mask[j]
+        mask_combined = torch.einsum('qi,j->qij', query_mask, s_mask_avg)  # (NQ, N, N)
         
-        # Classifier1 (Conv1d-based scoring)
-        # Input: (NQ, N) -> (NQ, 1, N) for Conv1d
-        max_sim = max_sim.unsqueeze(1)
+        # Masked similarity
+        masked_sim = sim_matrix * mask_combined  # (NQ, N, N)
+        
+        # Max over support patches for each query patch
+        max_sim = masked_sim.max(dim=-1)[0]  # (NQ, N)
+        
+        # Aggregate with classifier
+        max_sim = max_sim.unsqueeze(1)  # (NQ, 1, N)
         score = self.classifier1(max_sim)  # (NQ, 1, 1)
         score = score.squeeze(-1).squeeze(-1)  # (NQ,)
         
         return score
-    
-    def encode(
-        self,
-        patches: torch.Tensor,
-        class_cov: torch.Tensor,
-        class_proto: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Encode patches through full SAFF + SCA + CMA pipeline.
-        
-        Args:
-            patches: (B, N, C) patch embeddings
-            class_cov: (C, C) class covariance for SCA
-            class_proto: (C,) class prototype for CMA
-            
-        Returns:
-            refined_patches: (B, N, C)
-            refined_slots: (B, K, C)
-            alpha: (B, K) slot priorities
-        """
-        # Step 1: Slot Attention
-        slots, attn = self.slot_attention(patches)  # (B, K, C), (B, K, N)
-        
-        # Step 2: SCA - compute slot priority α_k
-        alpha = self.sca(slots, attn, patches, class_cov)  # (B, K)
-        
-        # Step 3: SAFF-style Patch Refinement
-        mask = self.compute_attention_mask(attn, alpha)  # (B, N)
-        refined_patches = self.refine_patches(patches, mask)  # (B, N, C)
-        
-        # Step 4: CMA - channel-level slot refinement
-        refined_slots = self.cma(slots, class_proto, slot_weights=alpha)  # (B, K, C)
-        
-        return refined_patches, refined_slots, alpha
     
     def forward(
         self,
         query_patches: torch.Tensor,
         support_patches_list: List[torch.Tensor]
     ) -> torch.Tensor:
-        """Full SAFF forward pass.
+        """Full SAFF forward pass with similarity-based masking.
         
         Args:
             query_patches: (NQ, N, C) query patch embeddings
@@ -339,24 +278,45 @@ class SAFFModule(nn.Module):
             support_patches = support_patches_list[m]  # (Shot, N, C)
             
             # Compute class statistics from support
-            class_cov = compute_class_covariance(support_patches)  # (C, C)
-            class_proto = compute_class_prototype(support_patches)  # (C,)
+            class_cov = compute_class_covariance(support_patches)
+            class_proto = compute_class_prototype(support_patches)
             
-            # Encode support
-            s_refined, s_slots, s_alpha = self.encode(
-                support_patches, class_cov, class_proto
-            )
+            # === Query: Slot Attention + SCA → mask ===
+            q_slots, q_attn = self.slot_attention(query_patches)  # (NQ, K, C), (NQ, K, N)
+            q_alpha = self.sca(q_slots, q_attn, query_patches, class_cov)  # (NQ, K)
+            q_mask = self.compute_attention_mask(q_attn, q_alpha)  # (NQ, N)
             
-            # Encode query (using same class statistics)
-            q_refined, q_slots, q_alpha = self.encode(
-                query_patches, class_cov, class_proto
-            )
+            # === Support: Slot Attention + SCA → mask ===
+            s_slots, s_attn = self.slot_attention(support_patches)  # (Shot, K, C), (Shot, K, N)
+            s_alpha = self.sca(s_slots, s_attn, support_patches, class_cov)  # (Shot, K)
+            s_mask = self.compute_attention_mask(s_attn, s_alpha)  # (Shot, N)
             
-            # Compute similarity
-            sim = self.compute_similarity(q_refined, s_refined)  # (NQ,)
+            # === Compute similarity with mask on SIMILARITY ===
+            # NO feature refinement - mask is applied to similarity!
+            sim = self.compute_masked_similarity(
+                query_patches,   # RAW patches
+                support_patches, # RAW patches
+                q_mask,
+                s_mask
+            )  # (NQ,)
+            
             scores.append(sim)
         
         # Stack: (NQ, M)
         scores = torch.stack(scores, dim=1)
         
         return scores
+    
+    def encode(
+        self,
+        patches: torch.Tensor,
+        class_cov: torch.Tensor,
+        class_proto: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Encode patches (for backward compatibility / visualization)."""
+        slots, attn = self.slot_attention(patches)
+        alpha = self.sca(slots, attn, patches, class_cov)
+        mask = self.compute_attention_mask(attn, alpha)
+        
+        # Return mask as "refined" placeholder (not actually refining features)
+        return patches, slots, alpha
