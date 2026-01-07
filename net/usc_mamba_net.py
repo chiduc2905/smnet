@@ -1,4 +1,4 @@
-"""SlotFreeSMNet: Slot-Free Few-Shot Learning Model.
+"""USCMambaNet: Unified Spatial-Channel Mamba Network.
 
 Implements a clean few-shot learning architecture following ADD-vs-MULTIPLY design:
 - ADD: Feature extraction (encoder, dual-branch fusion, channel mixing)
@@ -19,8 +19,8 @@ from net.backbone.unified_attention import UnifiedSpatialChannelAttention
 from net.backbone.simple_similarity import SimplePatchSimilarity, AllPairsSimilarity
 
 
-class SlotFreeSMNet(nn.Module):
-    """Slot-Free SMNet for Few-Shot Learning.
+class USCMambaNet(nn.Module):
+    """Unified Spatial-Channel Mamba Network (U-SCMambaNet).
     
     Uses ADD-vs-MULTIPLY design principles:
     - ADD: Feature extraction (encoder, fusion, channel mixing)
@@ -34,7 +34,7 @@ class SlotFreeSMNet(nn.Module):
             PatchEmbed2D → PatchMerging2D (×N) → ChannelProjection
         
         Feature Extraction (ADD-based):
-            DualBranchFusion: Local (AG-LKA) + Global (SS2D) with residual
+            DualBranchFusion: Local (AG-LKA + ChannelMamba) + Global (SS2D)
         
         Feature Selection (MUL-based):
             UnifiedSpatialChannelAttention: ECA++ (channel) + DWConv (spatial)
@@ -47,11 +47,11 @@ class SlotFreeSMNet(nn.Module):
         base_dim: Base embedding dim (default: 32)
         hidden_dim: Hidden dim (default: 64)
         num_merging_stages: Patch merging stages (default: 2)
-        d_state: Mamba state dimension (default: 16)
-        aggregation: 'mean' or 'topk' for similarity (default: 'mean')
-        topk_ratio: Ratio for top-k aggregation (default: 0.5)
+        d_state: Mamba state dimension (default: 4)
+        aggregation: 'mean' or 'topk' for similarity (default: 'topk')
+        topk_ratio: Ratio for top-k aggregation (default: 0.2)
         similarity_mode: 'position' or 'allpairs' (default: 'position')
-        temperature: Temperature for similarity scaling (default: 1.0)
+        temperature: Temperature for similarity scaling (default: 0.2)
         device: Device to use
     """
     
@@ -61,7 +61,7 @@ class SlotFreeSMNet(nn.Module):
         base_dim: int = 32,
         hidden_dim: int = 64,
         num_merging_stages: int = 2,
-        d_state: int = 8,
+        d_state: int = 4,
         aggregation: str = 'topk',
         topk_ratio: float = 0.2,
         similarity_mode: str = 'position',
@@ -98,13 +98,12 @@ class SlotFreeSMNet(nn.Module):
         final_merge_dim = current_dim
         
         # ============================================================
-        # STAGE 3: Channel Projection
+        # STAGE 3: Channel Projection (lightweight, with residual)
         # ============================================================
-        self.channel_proj = nn.Sequential(
-            nn.Conv2d(final_merge_dim, hidden_dim, kernel_size=1, bias=False),
-            nn.BatchNorm2d(hidden_dim),
-            nn.GELU()
-        )
+        # Use GroupNorm instead of BatchNorm (more stable for small batch)
+        # Linear projection only, no nonlinearity (reduce "heat")
+        self.channel_proj_conv = nn.Conv2d(final_merge_dim, hidden_dim, kernel_size=1, bias=False)
+        self.channel_proj_norm = nn.GroupNorm(num_groups=8, num_channels=hidden_dim)
         
         # ============================================================
         # STAGE 4: Feature Extraction (ADD-based)
@@ -152,8 +151,12 @@ class SlotFreeSMNet(nn.Module):
         for merge in self.merging_stages:
             f = merge(f)
         
-        # Stage 3: Channel projection
-        f = self.channel_proj(f)
+        # Stage 3: Channel projection (residual-friendly)
+        # Linear proj + GroupNorm, NO activation (reduce nonlinearity)
+        f_proj = self.channel_proj_conv(f)
+        f_proj = self.channel_proj_norm(f_proj)
+        # Skip connection if dims differ, just use proj
+        f = f_proj
         
         # Stage 4: Dual branch fusion (ADD-based)
         f = self.dual_branch(f)
@@ -214,17 +217,22 @@ class SlotFreeSMNet(nn.Module):
         return self.encode(images)
 
 
-def build_slot_free_smnet(
-    aggregation: str = 'mean',
+def build_usc_mamba_net(
+    aggregation: str = 'topk',
     **kwargs
-) -> SlotFreeSMNet:
-    """Factory function for SlotFreeSMNet.
+) -> USCMambaNet:
+    """Factory function for USCMambaNet.
     
     Args:
-        aggregation: 'mean' or 'topk' (default: 'mean')
+        aggregation: 'mean' or 'topk' (default: 'topk')
         **kwargs: Additional arguments
         
     Returns:
-        Configured SlotFreeSMNet
+        Configured USCMambaNet
     """
-    return SlotFreeSMNet(aggregation=aggregation, **kwargs)
+    return USCMambaNet(aggregation=aggregation, **kwargs)
+
+
+# Aliases for backward compatibility
+SlotFreeSMNet = USCMambaNet
+build_slot_free_smnet = build_usc_mamba_net

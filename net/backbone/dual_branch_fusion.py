@@ -138,10 +138,9 @@ class LocalAGLKABranch(nn.Module):
     Args:
         channels: Number of input/output channels
         dilation: Dilation for 7x7 conv (default: 2)
-        use_channel_mamba: Use ChannelMamba (ADD) instead of ECA++ (MUL)
     """
     
-    def __init__(self, channels: int, dilation: int = 2, use_channel_mamba: bool = False):
+    def __init__(self, channels: int, dilation: int = 2, **kwargs):
         super().__init__()
         
         self.channels = channels
@@ -177,16 +176,14 @@ class LocalAGLKABranch(nn.Module):
             nn.Sigmoid()
         )
         
-        # Channel interaction: ECA++ or ChannelMamba
-        self.use_channel_mamba = use_channel_mamba
-        if use_channel_mamba and CHANNEL_MAMBA_AVAILABLE:
-            # ADD-based: Y = X + α·Mix(X)
-            self.channel_mix = ChannelMamba(channels, d_state=4)
-            self.eca = None
-        else:
-            # MUL-based: Y = X ⊙ Sigmoid(Conv1D(GAP(X)))
-            self.channel_mix = None
-            self.eca = ECAPlus(channels)
+        # Channel mixing: ChannelMamba (ADD-based ONLY)
+        # REMOVED ECA++ - ChannelMamba is the default and only option
+        if not CHANNEL_MAMBA_AVAILABLE:
+            raise ImportError(
+                "ChannelMamba required but mamba-ssm not available. "
+                "Install with: pip install mamba-ssm"
+            )
+        self.channel_mix = ChannelMamba(channels, d_state=4)
         
         # Learnable residual scaling
         self.alpha = nn.Parameter(torch.tensor(0.1))
@@ -219,13 +216,8 @@ class LocalAGLKABranch(nn.Module):
         g = self.spatial_gate_fc(g).view(B, C, 1, 1)  # (B, C, 1, 1)
         s = s * g  # Spatial gating
         
-        # === Channel Interaction ===
-        if self.use_channel_mamba and self.channel_mix is not None:
-            # ChannelMamba (ADD): already includes residual internally
-            f = self.channel_mix(s)
-        else:
-            # ECA++ (MUL): c = Sigmoid(Conv1D(GAP(S)))
-            f = self.eca(s)
+        # === Channel Mixing (ChannelMamba ADD) ===
+        f = self.channel_mix(s)  # Y = S + α·Mix(S)
         
         # === Residual ===
         y = x + self.alpha * f
@@ -443,7 +435,7 @@ class DualBranchFusion(nn.Module):
     
     Args:
         channels: Number of input/output channels
-        d_state: SSM state dimension for global branch (default: 16)
+        d_state: SSM state dimension for global branch (default: 4)
         dilation: Dilation rate for local branch mid-range conv (default: 2)
         mode: Ablation mode - 'both', 'local_only', 'global_only' (default: 'both')
     """
@@ -451,16 +443,16 @@ class DualBranchFusion(nn.Module):
     def __init__(
         self,
         channels: int,
-        d_state: int = 8,
+        d_state: int = 4,
         dilation: int = 2,
-        mode: str = 'both'  # Ablation mode
+        mode: str = 'both'
     ):
         super().__init__()
         
         self.channels = channels
         self.mode = mode
         
-        # Branch 1: Local-Mid Spatial & Channel
+        # Branch 1: Local-Mid Spatial & Channel (uses ChannelMamba)
         if mode in ['both', 'local_only']:
             self.local_branch = LocalMidBranch(channels, dilation=dilation)
         else:

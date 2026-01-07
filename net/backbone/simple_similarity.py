@@ -70,7 +70,8 @@ class SimplePatchSimilarity(nn.Module):
         s_patches = support_features.flatten(2).transpose(1, 2)  # (Shot, N, C)
         
         # Average support across shots → prototype per patch position
-        s_proto = s_patches.mean(dim=0)  # (N, C)
+        # CRITICAL: Detach support to prevent gradient flowing through support
+        s_proto = s_patches.mean(dim=0).detach()  # (N, C) - detached!
         
         # 2. L2-normalize
         q_norm = F.normalize(q_patches, dim=-1)  # (NQ, N, C)
@@ -97,34 +98,34 @@ class SimplePatchSimilarity(nn.Module):
 
 
 class AllPairsSimilarity(nn.Module):
-    """All-pairs patch similarity (alternative to position-wise).
+    """All-pairs patch similarity with TOP-K aggregation.
     
     Computes NxN similarity matrix between all query and support patches,
-    then aggregates using max-per-query-patch + mean.
-    
-    This is more flexible but slightly more expensive than position-wise.
+    then aggregates using TOP-K (NOT max!) per query patch.
     
     Pipeline:
         1. Flatten: (B, C, H, W) → (B, N, C)
         2. L2-normalize
         3. All-pairs cosine: sim[i,j] = cos(q_i, s_j), shape (NQ, N, N)
-        4. Max per query patch: max_sim[i] = max_j(sim[i,j]), shape (NQ, N)
-        5. Mean: score = mean(max_sim), shape (NQ,)
+        4. TOP-K per query patch: top_sim[i] = topk_j(sim[i,j]), shape (NQ, N, k)
+        5. Mean over patches: score = mean(mean_k(top_sim)), shape (NQ,)
     
     Args:
         temperature: Temperature scaling for scores (default: 1.0)
+        topk_ratio: Ratio of top-k per query patch (default: 0.2)
     """
     
-    def __init__(self, temperature: float = 1.0):
+    def __init__(self, temperature: float = 1.0, topk_ratio: float = 0.2):
         super().__init__()
         self.temperature = temperature
+        self.topk_ratio = topk_ratio
     
     def forward(
         self,
         query_features: torch.Tensor,
         support_features: torch.Tensor
     ) -> torch.Tensor:
-        """Compute all-pairs similarity score.
+        """Compute all-pairs similarity score with TOP-K.
         
         Args:
             query_features: (NQ, C, H, W) query feature maps
@@ -140,8 +141,8 @@ class AllPairsSimilarity(nn.Module):
         q_patches = query_features.flatten(2).transpose(1, 2)  # (NQ, N, C)
         s_patches = support_features.flatten(2).transpose(1, 2)  # (Shot, N, C)
         
-        # Average support → prototype
-        s_proto = s_patches.mean(dim=0)  # (N, C)
+        # Average support → prototype (DETACHED!)
+        s_proto = s_patches.mean(dim=0).detach()  # (N, C)
         
         # L2-normalize
         q_norm = F.normalize(q_patches, dim=-1)  # (NQ, N, C)
@@ -150,10 +151,13 @@ class AllPairsSimilarity(nn.Module):
         # All-pairs cosine similarity: (NQ, N, N)
         sim_matrix = torch.einsum('qnc,mc->qnm', q_norm, s_norm)
         
-        # Max per query patch
-        max_sim = sim_matrix.max(dim=-1)[0]  # (NQ, N)
+        # TOP-K per query patch (NOT max!)
+        # For each of N query patches, get top-k similarities to support patches
+        k = max(1, int(N * self.topk_ratio))
+        topk_per_patch = sim_matrix.topk(k, dim=-1)[0]  # (NQ, N, k)
         
-        # Mean aggregation
-        scores = max_sim.mean(dim=-1) / self.temperature  # (NQ,)
+        # Mean over k, then mean over N patches
+        mean_per_patch = topk_per_patch.mean(dim=-1)  # (NQ, N)
+        scores = mean_per_patch.mean(dim=-1) / self.temperature  # (NQ,)
         
         return scores

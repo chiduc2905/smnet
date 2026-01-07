@@ -159,8 +159,7 @@ class SAFFModule(nn.Module):
         num_iters: int = 5,
         num_patches: int = 256,
         lambda_init: float = 1.0,
-        temperature: float = 0.5,  # Temperature for similarity scaling (higher = softer)
-        debug: bool = True  # Enable debug logging
+        temperature: float = 0.5  # Temperature for similarity scaling (higher = softer)
     ):
         super().__init__()
         
@@ -168,8 +167,6 @@ class SAFFModule(nn.Module):
         self.num_slots = num_slots
         self.num_patches = num_patches
         self.temperature = temperature
-        self.debug = debug
-        self._debug_counter = 0  # For periodic debug logging
         
         # Step 1: Slot Attention (Mamba)
         self.slot_attention = SAFFSlotAttention(
@@ -277,13 +274,6 @@ class SAFFModule(nn.Module):
         
         # Max over support patches for each query patch
         max_sim = sim_matrix.max(dim=-1)[0]  # (NQ, N)
-        
-        # Debug logging (every 100 calls)
-        if self.debug and self.training:
-            self._debug_counter += 1
-            if self._debug_counter % 100 == 1:
-                print(f"[DEBUG] max_sim: range=[{max_sim.min().item():.3f}, {max_sim.max().item():.3f}], "
-                      f"mean={max_sim.mean().item():.3f}, std={max_sim.std().item():.4f}")
         
         # Classifier1 (Conv1d-based scoring)
         # Input: (NQ, N) -> (NQ, 1, N) for Conv1d
