@@ -119,6 +119,8 @@ class AllPairsSimilarity(nn.Module):
         super().__init__()
         self.temperature = temperature
         self.topk_ratio = topk_ratio
+        # FIX 2: Learnable logit scale for CE gradient boost
+        self.logit_scale = nn.Parameter(torch.tensor(10.0))
     
     def forward(
         self,
@@ -158,6 +160,9 @@ class AllPairsSimilarity(nn.Module):
         
         # Mean over k, then mean over N patches
         mean_per_patch = topk_per_patch.mean(dim=-1)  # (NQ, N)
-        scores = mean_per_patch.mean(dim=-1) / self.temperature  # (NQ,)
+        scores = mean_per_patch.mean(dim=-1)  # (NQ,)
+        
+        # FIX 2: Apply learnable logit scale (target std ≈ 3-6)
+        scores = scores * self.logit_scale / self.temperature
         
         return scores

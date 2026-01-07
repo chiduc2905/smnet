@@ -79,7 +79,7 @@ class USCMambaNet(nn.Module):
         d_state: int = 4,
         aggregation: str = 'mean',      # CHANGED: mean (100% patches) for training
         topk_ratio: float = 1.0,        # CHANGED: 100% patches during training
-        similarity_mode: str = 'position',
+        similarity_mode: str = 'allpairs',  # FIX 1: allpairs for debug
         temperature: float = 1.0,       # CHANGED: higher temp for training
         device: str = 'cuda'
     ):
