@@ -163,7 +163,8 @@ def load_single_episode(args):
     loader = DataLoader(fewshot_dataset, batch_size=1, shuffle=False)
     
     # Get single episode
-    for support, s_labels, query, q_labels in loader:
+    # FewshotDataset returns: (query, q_labels, support, s_labels)
+    for query, q_labels, support, s_labels in loader:
         return support, s_labels, query, q_labels
 
 
