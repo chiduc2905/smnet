@@ -439,7 +439,26 @@ def save_debug_report(args, overfit_success):
 
 ---
 
-## 2. Architecture Summary
+## 2. Current Similarity Configuration (DEBUG MODE)
+
+| Setting | Value | Note |
+|---------|-------|------|
+| **similarity_mode** | `allpairs` | FIX 1: soft alignment |
+| **aggregation** | `mean` | 100% patches |
+| **topk_ratio** | `1.0` | all patches |
+| **temperature** | `1.0` | softer scores |
+| **logit_scale** | `10.0` (learnable) | FIX 2: boost CE gradient |
+
+### AllPairs Similarity Formula:
+```
+S_ij = cos(q_i, s_j)           # all query-support patch pairs
+score_i = mean_k topk(S_ij)    # top-k per query patch
+final = mean_i(score_i) × logit_scale
+```
+
+---
+
+## 3. Architecture Summary
 
 ```
 Input (B, 3, 64, 64)
@@ -459,14 +478,13 @@ DualBranchFusion → (B, 64, 32, 32)
 UnifiedSpatialChannelAttention → (B, 64, 32, 32)
   - RESIDUAL GATING: X + X⊙A_ch + X⊙A_sp
     ↓
-SimplePatchSimilarity → (NQ, Way)
-  - aggregation='mean' (100% patches)
-  - temperature=1.0
+AllPairsSimilarity → (NQ, Way)
+  - all-pairs cosine + top-k + logit_scale
 ```
 
 ---
 
-## 3. Debug Results
+## 4. Debug Results
 
 ### Level 2: Overfit Test (CRITICAL)
 
