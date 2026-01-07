@@ -142,8 +142,9 @@ def load_single_episode(args):
         image_size=args.image_size
     )
     
-    train_X = dataset.X_train
-    train_y = dataset.y_train
+    # Convert to torch tensors (FewshotDataset expects tensors)
+    train_X = torch.from_numpy(dataset.X_train).float()
+    train_y = torch.from_numpy(dataset.y_train).long()
     
     print(f"  Train: {train_X.shape}")
     
