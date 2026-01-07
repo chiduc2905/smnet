@@ -48,7 +48,7 @@ def run_experiment(model, shot, samples, dataset_path, dataset_name, project):
         '--lr', '1e-3',
         '--eta_min', '1e-5',
         '--weight_decay', '1e-4',
-        '--margin', '0.2',  # CosFace margin
+        '--margin', '0',  # No margin with covariance (already breaks symmetry)
         '--similarity_mode', 'covariance',  # Covariance-based similarity
         '--episode_num_train', '100',
         '--episode_num_val', '150',

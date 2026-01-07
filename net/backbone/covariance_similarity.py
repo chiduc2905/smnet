@@ -7,8 +7,9 @@ Formula:
     score = mean(F) * logit_scale
 
 CRITICAL:
-    - NO L2-normalize on query (destroys second-order info)
-    - NO full matrix (1024x1024) - use efficient formula
+    - NO L2-normalize on query
+    - Center SUPPORT only, NOT query
+    - Vectorized implementation (no loop)
 """
 import torch
 import torch.nn as nn
@@ -16,12 +17,12 @@ import torch.nn.functional as F
 
 
 class CovarianceSimilarity(nn.Module):
-    """Covariance-based similarity metric (CORRECTED VERSION).
+    """Covariance-based similarity metric (VECTORIZED VERSION).
     
     Pipeline (per class):
-        1. Compute covariance matrix Σ from support patches
-        2. Y = Σ @ Q (NO L2-normalize!)
-        3. F = (Q * Y).sum(dim=0) - efficient diag computation
+        1. Compute covariance matrix Σ from support patches (centered)
+        2. Y = Σ @ Q_all (VECTORIZED, no loop)
+        3. F = (Q * Y).sum(dim=1) - efficient diag
         4. score = mean(F) * logit_scale
     
     Args:
@@ -50,7 +51,7 @@ class CovarianceSimilarity(nn.Module):
         X = support_features.reshape(Shot, C, d)  # (Shot, C, d)
         X = X.mean(dim=0)  # (C, d) - average over shots
         
-        # Center the features along spatial dimension
+        # Center the features along spatial dimension (SUPPORT ONLY!)
         X = X - X.mean(dim=1, keepdim=True)  # (C, d)
         
         # Covariance: Σ = X @ X^T / (d-1)
@@ -63,7 +64,7 @@ class CovarianceSimilarity(nn.Module):
         query_features: torch.Tensor,
         support_features: torch.Tensor
     ) -> torch.Tensor:
-        """Compute covariance-based similarity score.
+        """Compute covariance-based similarity score (VECTORIZED).
         
         Args:
             query_features: (NQ, C, H, W) query feature maps
@@ -78,23 +79,20 @@ class CovarianceSimilarity(nn.Module):
         # Step 1: Compute covariance matrix Σ from support
         cov = self.compute_covariance(support_features)  # (C, C)
         
-        # Step 2: For each query, compute F efficiently (NO L2-normalize!)
-        scores = []
+        # Step 2: Vectorized query processing (NO loop, NO center query)
+        # Q_all: (NQ, C, d) - NO normalize, NO center!
+        Q_all = query_features.reshape(NQ, C, d)  # (NQ, C, d)
         
-        for i in range(NQ):
-            # Q: (C, d) - NO normalize!
-            Q = query_features[i].view(C, d)  # (C, d)
-            
-            # Efficient diagonal computation:
-            # diag(Q^T Σ Q) = sum_c (Q * (Σ @ Q))
-            Y = torch.mm(cov, Q)  # (C, d)
-            F_i = (Q * Y).sum(dim=0)  # (d,) - this is diag(Q^T Σ Q)
-            
-            # Mean over spatial locations
-            score_i = F_i.mean()  # scalar
-            scores.append(score_i)
+        # Y_all = Σ @ Q_all for all queries at once
+        # cov: (C, C), Q_all: (NQ, C, d)
+        # Use einsum for batched matmul: (C, C) @ (NQ, C, d) -> (NQ, C, d)
+        Y_all = torch.einsum('cc,ncd->ncd', cov, Q_all)  # (NQ, C, d)
         
-        scores = torch.stack(scores)  # (NQ,)
+        # F_all = (Q * Y).sum(dim=1) - this is diag(Q^T Σ Q) for each query
+        F_all = (Q_all * Y_all).sum(dim=1)  # (NQ, d)
+        
+        # Mean over spatial locations
+        scores = F_all.mean(dim=1)  # (NQ,)
         
         # Apply learnable logit scale
         scores = scores * self.logit_scale
