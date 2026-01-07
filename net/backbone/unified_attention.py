@@ -1,11 +1,9 @@
-"""UnifiedSpatialChannelAttention: The ONLY multiplicative attention module.
+"""UnifiedSpatialChannelAttention: Residual Gating for Feature Selection.
 
-This module is the ONLY place where MULTIPLY (gating) is allowed.
-Applied AFTER DualBranchFusion for feature selection.
+FIXED: Changed from multiplicative (X ⊙ A_ch ⊙ A_sp) to residual gating:
+    X_out = X + X ⊙ A_ch + X ⊙ A_sp
 
-Reference:
-    - MULTIPLY for modules that SELECT or REWEIGHT existing features (attention)
-    - All other modules use ADD (residual)
+This prevents gradient collapse from cascaded multiplications.
 """
 import torch
 import torch.nn as nn
@@ -16,31 +14,15 @@ from net.backbone.dual_branch_fusion import ECAPlus
 
 
 class UnifiedSpatialChannelAttention(nn.Module):
-    """Unified Attention Block (MULTIPLY for selection).
+    """Unified Attention Block with RESIDUAL GATING.
     
-    This is the ONLY multiplicative attention in the pipeline.
-    Applied after DualBranchFusion for feature selection.
+    IMPORTANT: Uses residual gating instead of multiplicative:
+        X_out = X + X ⊙ A_ch + X ⊙ A_sp
     
-    Design:
-        - Channel: ECAPlus (reused from dual_branch_fusion)
-        - Spatial: Gated DWConv (3×3)
-        - Order: Channel → Spatial
-        - Combo: Y = X ⊙ A_ch ⊙ A_sp
-    
-    Architecture:
-        Input X
-            ↓
-        ┌─────────────────────────────────────────────┐
-        │ Channel Attention: ECA++                    │
-        │   Y1 = X ⊙ Sigmoid(Conv1D(GAP(X)))         │
-        └─────────────────────────────────────────────┘
-            ↓
-        ┌─────────────────────────────────────────────┐
-        │ Spatial Attention: Gated DWConv            │
-        │   Y2 = Y1 ⊙ Sigmoid(DWConv3x3(Y1))         │
-        └─────────────────────────────────────────────┘
-            ↓
-        Output Y2
+    This allows:
+        - Strong gradient flow through X (identity)
+        - Additive contributions from channel/spatial attention
+        - No cascaded multiplications that collapse gradients
     
     Args:
         channels: Number of input channels
@@ -50,20 +32,25 @@ class UnifiedSpatialChannelAttention(nn.Module):
     def __init__(self, channels: int, spatial_kernel: int = 3):
         super().__init__()
         
-        # Channel attention: reuse ECAPlus
-        self.channel_attn = ECAPlus(channels)
+        # Channel attention: ECAPlus returns A_ch (attention weights after sigmoid)
+        # We need raw attention weights, so create custom version
+        self.channel_gap = nn.AdaptiveAvgPool2d(1)
+        # Adaptive kernel size for ECA
+        t = int(abs(math.log2(channels) / 2 + 0.5))
+        k = t if t % 2 else t + 1
+        k = max(k, 3)
+        self.channel_conv1d = nn.Conv1d(1, 1, kernel_size=k, padding=k // 2, bias=False)
+        self.channel_sigmoid = nn.Sigmoid()
         
-        # Spatial attention: Gated depthwise + sigmoid
-        self.spatial_attn = nn.Sequential(
-            nn.Conv2d(
-                channels, channels,
-                kernel_size=spatial_kernel,
-                padding=spatial_kernel // 2,
-                groups=channels,  # Depthwise
-                bias=False
-            ),
-            nn.Sigmoid()
+        # Spatial attention: DWConv → Sigmoid
+        self.spatial_conv = nn.Conv2d(
+            channels, channels,
+            kernel_size=spatial_kernel,
+            padding=spatial_kernel // 2,
+            groups=channels,  # Depthwise
+            bias=False
         )
+        self.spatial_sigmoid = nn.Sigmoid()
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -71,12 +58,20 @@ class UnifiedSpatialChannelAttention(nn.Module):
             x: (B, C, H, W) input features
             
         Returns:
-            (B, C, H, W) attention-weighted features
+            (B, C, H, W) attention-weighted features with residual
         """
-        # Channel selection (ECA++ - MUL)
-        x = self.channel_attn(x)
+        B, C, H, W = x.shape
         
-        # Spatial selection (MUL)
-        x = x * self.spatial_attn(x)
+        # Channel attention weights A_ch
+        y = self.channel_gap(x).view(B, C, 1).transpose(1, 2)  # (B, 1, C)
+        y = self.channel_conv1d(y)  # (B, 1, C)
+        A_ch = self.channel_sigmoid(y).transpose(1, 2).view(B, C, 1, 1)  # (B, C, 1, 1)
         
-        return x
+        # Spatial attention weights A_sp
+        A_sp = self.spatial_sigmoid(self.spatial_conv(x))  # (B, C, H, W)
+        
+        # RESIDUAL GATING: X_out = X + X⊙A_ch + X⊙A_sp
+        x_out = x + x * A_ch + x * A_sp
+        
+        return x_out
+

@@ -212,9 +212,7 @@ class LocalAGLKABranch(nn.Module):
             channels, channels, kernel_size=(7, 1),
             padding=(3, 0), groups=channels, bias=False
         )
-        # Learnable fusion scalars α, β (initialized to 0.5)
-        self.alpha_temporal = nn.Parameter(torch.tensor(0.5))
-        self.beta_frequency = nn.Parameter(torch.tensor(0.5))
+        # NOTE: α, β removed for debugging - using simple addition
         
         # Spatial gate: Sigmoid(Linear(GAP))
         self.spatial_gap = nn.AdaptiveAvgPool2d(1)
@@ -254,8 +252,8 @@ class LocalAGLKABranch(nn.Module):
         x_t = self.asym_temporal(x2)   # DWConv(1×9) - temporal RF
         x_f = self.asym_frequency(x2)  # DWConv(7×1) - frequency RF
         
-        # === Parallel Fusion: X_out = X_sym + α·X_t + β·X_f ===
-        s = x_sym + self.alpha_temporal * x_t + self.beta_frequency * x_f
+        # === Parallel Fusion: SIMPLE ADDITION (no α, β for debugging) ===
+        s = x_sym + x_t + x_f
         
         # === Spatial Gate ===
         # g = Sigmoid(Linear(GAP(X2)))

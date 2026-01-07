@@ -77,10 +77,10 @@ class USCMambaNet(nn.Module):
         hidden_dim: int = 64,
         num_merging_stages: int = 2,
         d_state: int = 4,
-        aggregation: str = 'topk',
-        topk_ratio: float = 0.2,
+        aggregation: str = 'mean',      # CHANGED: mean (100% patches) for training
+        topk_ratio: float = 1.0,        # CHANGED: 100% patches during training
         similarity_mode: str = 'position',
-        temperature: float = 0.2,
+        temperature: float = 1.0,       # CHANGED: higher temp for training
         device: str = 'cuda'
     ):
         super().__init__()
