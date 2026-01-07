@@ -135,11 +135,11 @@ def train_loop(net, train_loader, val_X, val_y, args):
     criterion_main = ContrastiveLoss().to(device)
     
     # Calculate feature dimension dynamically
-    # SMNet uses extract_features which returns (B, N_patches, hidden_dim)
+    # USCMambaNet.encode() returns (B, hidden_dim, H', W')
     with torch.no_grad():
         dummy_input = torch.randn(1, 3, args.image_size, args.image_size).to(device)
-        dummy_patches = net.extract_features(dummy_input)  # (1, N, C)
-        feat_dim = dummy_patches.shape[-1]  # hidden_dim
+        dummy_features = net.encode(dummy_input)  # (1, C, H', W')
+        feat_dim = dummy_features.shape[1]  # hidden_dim (channel dim)
         
     criterion_center = CenterLoss(num_classes=args.way_num, feat_dim=feat_dim, device=device)
     
