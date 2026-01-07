@@ -468,20 +468,20 @@ def main():
     args.device = 'cuda' if torch.cuda.is_available() else 'cpu'
     
     print(f"\n{'='*60}")
-    print("SMNet: Slot Mamba Network")
+    print("USCMambaNet: Unified Spatial-Channel Mamba Network")
     print('='*60)
     print(f"Config: {args.model} | {args.shot_num}-shot | {args.num_epochs} epochs | Device: {args.device}")
-    print(f"Architecture: ConvMixer → SS2D → ChannelAttn → SlotAttn({args.num_slots}) → SlotMamba → Covariance")
+    print(f"Architecture: PatchEmbed → ConvBlocks → PatchMerge → DualBranch(AG-LKA+SS2D) → UnifiedAttn → SimpleSimilarity")
     print(f"Dataset: {args.dataset_path}")
     
     # Initialize WandB
     samples_str = f"{args.training_samples}samples" if args.training_samples else "all"
-    run_name = f"smnet_{args.dataset_name}_{samples_str}_{args.shot_num}shot"
+    run_name = f"uscmamba_{args.dataset_name}_{samples_str}_{args.shot_num}shot"
     
     config = vars(args).copy()
-    config['architecture'] = 'SMNet (Slot Mamba Network)'
+    config['architecture'] = 'USCMambaNet (Unified Spatial-Channel Mamba Network)'
     
-    wandb.init(project=args.project, config=config, name=run_name, group=f"smnet_{args.dataset_name}", job_type=args.mode)
+    wandb.init(project=args.project, config=config, name=run_name, group=f"uscmamba_{args.dataset_name}", job_type=args.mode)
     
     seed_func(args.seed)
     
