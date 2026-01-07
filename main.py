@@ -33,6 +33,7 @@ from function.function import (
     ContrastiveLoss, CenterLoss, seed_func,
     plot_confusion_matrix, plot_tsne, plot_training_curves
 )
+from function.debug_utils import print_grad_norm, print_logit_stats, set_debug_mode, is_debug_mode
 
 # Model
 from net.usc_mamba_net import USCMambaNet
@@ -97,6 +98,9 @@ def get_args():
     parser.add_argument('--lambda_center', type=float, default=0.0, 
                         help='Weight for Center Loss (default: 0.0, disabled)')
     
+    # Debug
+    parser.add_argument('--debug', action='store_true',
+                        help='Enable debug mode: print gradients, feature stats, logits')
     # Mode
     parser.add_argument('--mode', type=str, default='train', choices=['train', 'test'])
     
@@ -199,8 +203,8 @@ def train_loop(net, train_loader, val_X, val_y, args):
             # Center Loss (optional)
             if args.lambda_center > 0:
                 q_flat = query.view(-1, C, H, W)
-                patches = net.extract_features(q_flat)  # (NQ, N, C)
-                features = patches.mean(dim=1)  # Global avg pool: (NQ, C)
+                feat_maps = net.encode(q_flat)  # (NQ, C, H', W')
+                features = feat_maps.mean(dim=(2, 3))  # Global avg pool: (NQ, C)
                 features = F.normalize(features, p=2, dim=1)
                 loss_center = criterion_center(features, targets)
                 loss = loss_main + args.lambda_center * loss_center
@@ -208,6 +212,11 @@ def train_loop(net, train_loader, val_X, val_y, args):
                 loss = loss_main
             
             loss.backward()
+            
+            # DEBUG: Print gradient norms and logit stats
+            if args.debug and step == 0:  # Print once per epoch
+                print_grad_norm(net, epoch, step, print_every=1)
+                print_logit_stats(scores, step, print_every=1)
             
             # Gradient clipping
             if args.grad_clip > 0:
