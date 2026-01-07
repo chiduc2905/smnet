@@ -137,17 +137,19 @@ class DebugUSCMambaNet(USCMambaNet):
 def load_single_episode(args):
     """Load a single fixed episode for overfit testing."""
     print("\n📦 Loading dataset...")
-    train_X, train_y, val_X, val_y, _, _ = load_dataset(
+    dataset = load_dataset(
         args.dataset_path,
-        image_size=args.image_size,
-        training_samples=None  # Use all training data
+        image_size=args.image_size
     )
     
-    print(f"  Train: {train_X.shape}, Val: {val_X.shape}")
+    train_X = dataset.X_train
+    train_y = dataset.y_train
+    
+    print(f"  Train: {train_X.shape}")
     
     # Create single episode
     seed_func(args.seed)
-    dataset = FewshotDataset(
+    fewshot_dataset = FewshotDataset(
         train_X, train_y,
         episode_num=1,
         way_num=args.way_num,
@@ -157,7 +159,7 @@ def load_single_episode(args):
     )
     
     from torch.utils.data import DataLoader
-    loader = DataLoader(dataset, batch_size=1, shuffle=False)
+    loader = DataLoader(fewshot_dataset, batch_size=1, shuffle=False)
     
     # Get single episode
     for support, s_labels, query, q_labels in loader:
