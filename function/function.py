@@ -364,7 +364,7 @@ def plot_tsne(features, labels, num_classes=3, save_path=None):
         scatter = sns.scatterplot(
             x=embedded[:, 0], y=embedded[:, 1],
             hue=label_names, palette='bright',
-            s=80, alpha=0.8, legend='full'
+            s=80, alpha=0.8, legend='full', edgecolor='none'
         )
         
         sns.despine()

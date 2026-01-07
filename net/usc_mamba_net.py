@@ -19,6 +19,21 @@ from net.backbone.unified_attention import UnifiedSpatialChannelAttention
 from net.backbone.simple_similarity import SimplePatchSimilarity, AllPairsSimilarity
 
 
+class ConvBlock(nn.Module):
+    """Conv3×3 block with residual: Y = Proj(X) + GELU(BN(Conv(X))).
+    
+    Used to replace first PatchMerging to preserve spatial resolution.
+    """
+    def __init__(self, in_ch: int, out_ch: int):
+        super().__init__()
+        self.conv = nn.Conv2d(in_ch, out_ch, kernel_size=3, padding=1, bias=False)
+        self.bn = nn.BatchNorm2d(out_ch)
+        self.act = nn.GELU()
+        # Residual projection if channels differ
+        self.proj = nn.Conv2d(in_ch, out_ch, 1, bias=False) if in_ch != out_ch else nn.Identity()
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.proj(x) + self.act(self.bn(self.conv(x)))
 class USCMambaNet(nn.Module):
     """Unified Spatial-Channel Mamba Network (U-SCMambaNet).
     
@@ -84,18 +99,21 @@ class USCMambaNet(nn.Module):
         )
         
         # ============================================================
-        # STAGE 2: Hierarchical Patch Merging
+        # STAGE 2: ConvBlocks (preserve spatial, increase channels)
+        # (B, 32, 64, 64) → (B, 64, 64, 64)
         # ============================================================
-        self.merging_stages = nn.ModuleList()
-        current_dim = base_dim
+        self.conv_blocks = nn.Sequential(
+            ConvBlock(base_dim, base_dim * 2),      # 32 → 64
+            ConvBlock(base_dim * 2, base_dim * 2),  # 64 → 64
+        )
         
-        for i in range(num_merging_stages):
-            self.merging_stages.append(
-                PatchMerging2D(dim=current_dim, norm_layer=nn.LayerNorm)
-            )
-            current_dim = current_dim * 2
+        # ============================================================
+        # STAGE 3: Single PatchMerging (spatial /2, channels ×2)
+        # (B, 64, 64, 64) → (B, 128, 32, 32)
+        # ============================================================
+        self.patch_merge = PatchMerging2D(dim=base_dim * 2, norm_layer=nn.LayerNorm)
         
-        final_merge_dim = current_dim
+        final_merge_dim = base_dim * 4  # 128
         
         # ============================================================
         # STAGE 3: Channel Projection (lightweight, with residual)
@@ -144,24 +162,26 @@ class USCMambaNet(nn.Module):
         Returns:
             features: (B, hidden_dim, H', W') encoded features
         """
-        # Stage 1: Patch embedding
+        # Stage 1: Patch embedding (B, 3, 64, 64) → (B, 32, 64, 64)
         f = self.patch_embed(x)
         
-        # Stage 2: Hierarchical merging
-        for merge in self.merging_stages:
-            f = merge(f)
+        # Stage 2: ConvBlocks (preserve spatial) (B, 32, 64, 64) → (B, 64, 64, 64)
+        f = self.conv_blocks(f)
         
-        # Stage 3: Channel projection (residual-friendly)
+        # Stage 3: Single PatchMerging (B, 64, 64, 64) → (B, 128, 32, 32)
+        f = self.patch_merge(f)
+        
+        # Stage 4: Channel projection (residual-friendly)
         # Linear proj + GroupNorm, NO activation (reduce nonlinearity)
         f_proj = self.channel_proj_conv(f)
         f_proj = self.channel_proj_norm(f_proj)
         # Skip connection if dims differ, just use proj
         f = f_proj
         
-        # Stage 4: Dual branch fusion (ADD-based)
+        # Stage 5: Dual branch fusion (ADD-based)
         f = self.dual_branch(f)
         
-        # Stage 5: Unified attention (MUL-based)
+        # Stage 6: Unified attention (MUL-based)
         f = self.unified_attention(f)
         
         return f

@@ -1,12 +1,12 @@
-"""Run all SMNet experiments for 1-shot, 5-shot, 10-shot with various training sample sizes."""
+"""Run all USCMambaNet experiments for 1-shot, 5-shot with various training sample sizes."""
 import subprocess
 import sys
 import argparse
 import os
 
 def get_args():
-    parser = argparse.ArgumentParser(description='Run all SMNet experiments')
-    parser.add_argument('--project', type=str, default='smnet', help='WandB project name')
+    parser = argparse.ArgumentParser(description='Run all USCMambaNet experiments')
+    parser.add_argument('--project', type=str, default='uscmamba', help='WandB project name')
     parser.add_argument('--dataset_path', type=str, 
                         default='./scalogram_minh',
                         help='Path to dataset')
@@ -21,10 +21,10 @@ SHOTS = [1, 5]
 SAMPLES_LIST = [80, 200, 600, 6000]
 
 # Query samples (same for train/val/test)
-QUERY_NUM = 5
+QUERY_NUM = 1  # Changed from 5 to 1
 
 # Model variants
-MODELS = ['smnet']
+MODELS = ['uscmamba']
 
 
 def run_experiment(model, shot, samples, dataset_path, dataset_name, project):
@@ -72,7 +72,7 @@ def main():
     current = 0
     
     print("="*60)
-    print("SMNet (Slot Mamba Network) - Full Experiment Suite")
+    print("USCMambaNet - Full Experiment Suite")
     print("="*60)
     print(f"Models: {MODELS}")
     print(f"Shots: {SHOTS}")

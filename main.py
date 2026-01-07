@@ -1,11 +1,10 @@
-"""SMNet (Slot Mamba Network) - Training and Evaluation.
+"""USCMambaNet (Unified Spatial-Channel Mamba Network) - Training and Evaluation.
 
-This script trains and evaluates SMNet which uses:
-- ConvMixer for local spatial extraction
-- SS2D (4-way Mamba) for global spatial context
-- Slot Attention for semantic grouping
-- Slot Mamba for inter-slot reasoning
-- Covariance-based similarity for classification
+This script trains and evaluates USCMambaNet which uses:
+- PatchEmbed + PatchMerging for hierarchical feature extraction
+- DualBranchFusion (AG-LKA + SS2D) for local-global features
+- UnifiedSpatialChannelAttention for feature selection
+- SimplePatchSimilarity for non-learnable cosine matching
 """
 import os
 import argparse
@@ -36,7 +35,7 @@ from function.function import (
 )
 
 # Model
-from net.slot_fewshot import SMNet
+from net.usc_mamba_net import USCMambaNet
 
 
 # =============================================================================
@@ -57,15 +56,13 @@ def get_args():
     
     # Model
     parser.add_argument('--model', type=str, default='smnet', 
-                        choices=['smnet'])
+                        choices=['uscmamba'])
     parser.add_argument('--hidden_dim', type=int, default=64,
                         help='Hidden dimension for feature extractor')
-    parser.add_argument('--num_slots', type=int, default=5,
-                        help='Number of semantic slots K (paper: 5)')
-    parser.add_argument('--slot_iters', type=int, default=5,
-                        help='Slot attention iterations (paper: 5)')
-    parser.add_argument('--lambda_init', type=float, default=1.0,
-                        help='Lambda for class-aware refinement (paper: 2.0)')
+    parser.add_argument('--aggregation', type=str, default='topk',
+                        choices=['mean', 'topk'], help='Similarity aggregation')
+    parser.add_argument('--topk_ratio', type=float, default=0.2,
+                        help='Top-k ratio for similarity aggregation')
     
     # Few-shot settings
     parser.add_argument('--way_num', type=int, default=4)
@@ -114,14 +111,12 @@ def get_model(args):
     """Initialize model based on args."""
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
-    model = SMNet(
+    model = USCMambaNet(
         in_channels=3,  # RGB input
-        num_slots=args.num_slots,
-        slot_iters=args.slot_iters,  # SAFF paper: 5 iterations
-        learnable_slots=True,
-        regularization=1e-3,
+        hidden_dim=args.hidden_dim,
+        aggregation=args.aggregation,
+        topk_ratio=args.topk_ratio,
         temperature=args.temperature,
-        lambda_init=args.lambda_init,  # SAFF paper: lambda=2.0
         device=str(device)
     )
     
@@ -338,7 +333,7 @@ def test_final(net, loader, args):
     num_episodes = len(loader)
     
     print(f"\n{'='*60}")
-    print(f"Final Test: SMNet | {args.dataset_name} | {args.shot_num}-shot")
+    print(f"Final Test: USCMambaNet | {args.dataset_name} | {args.shot_num}-shot")
     print(f"{num_episodes} episodes × {args.way_num} classes × {args.query_num} query")
     print('='*60)
     
@@ -370,10 +365,10 @@ def test_final(net, loader, args):
             all_preds.extend(preds.cpu().numpy())
             all_targets.extend(targets.cpu().numpy())
             
-            # Extract features for t-SNE
+            # Extract features for t-SNE using encode (returns B,C,H,W)
             q_flat = query.view(-1, C, H, W)
-            patches = net.extract_features(q_flat)  # (NQ, N, C)
-            feat = patches.mean(dim=1)  # Global avg pool: (NQ, C)
+            features = net.encode(q_flat)  # (NQ, hidden_dim, H', W')
+            feat = features.mean(dim=(2, 3))  # Global avg pool: (NQ, hidden_dim)
             all_features.append(feat.cpu().numpy())
     
     # Metrics
@@ -525,8 +520,9 @@ def main():
         print(f"Using {args.training_samples} training samples ({per_class}/class)")
     
     # Create data loaders
+    # Training: 1 query per class (reduces variance, faster training)
     train_ds = FewshotDataset(train_X, train_y, args.episode_num_train,
-                              args.way_num, args.shot_num, args.query_num, args.seed)
+                              args.way_num, args.shot_num, 1, args.seed)
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
     
     test_ds = FewshotDataset(test_X, test_y, args.episode_num_test,
