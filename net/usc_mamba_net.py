@@ -17,6 +17,7 @@ from net.backbone.feature_extractor import PatchEmbed2D, PatchMerging2D
 from net.backbone.dual_branch_fusion import DualBranchFusion
 from net.backbone.unified_attention import UnifiedSpatialChannelAttention
 from net.backbone.simple_similarity import SimplePatchSimilarity, AllPairsSimilarity
+from net.backbone.covariance_similarity import CovarianceSimilarity
 
 
 class ConvBlock(nn.Module):
@@ -77,10 +78,10 @@ class USCMambaNet(nn.Module):
         hidden_dim: int = 64,
         num_merging_stages: int = 2,
         d_state: int = 4,
-        aggregation: str = 'mean',      # CHANGED: mean (100% patches) for training
-        topk_ratio: float = 1.0,        # CHANGED: 100% patches during training
-        similarity_mode: str = 'allpairs',  # FIX 1: allpairs for debug
-        temperature: float = 1.0,       # CHANGED: higher temp for training
+        aggregation: str = 'mean',
+        topk_ratio: float = 1.0,
+        similarity_mode: str = 'covariance',  # NEW: covariance-based similarity
+        temperature: float = 1.0,
         device: str = 'cuda'
     ):
         super().__init__()
@@ -148,6 +149,8 @@ class USCMambaNet(nn.Module):
             )
         elif similarity_mode == 'allpairs':
             self.similarity = AllPairsSimilarity(temperature=temperature)
+        elif similarity_mode == 'covariance':
+            self.similarity = CovarianceSimilarity(logit_scale=10.0)
         else:
             raise ValueError(f"Unknown similarity_mode: {similarity_mode}")
         

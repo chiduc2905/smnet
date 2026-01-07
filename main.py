@@ -86,6 +86,9 @@ def get_args():
     parser.add_argument('--warmup_iters', type=int, default=500, help='Warmup iterations')
     parser.add_argument('--temperature', type=float, default=0.5,
                         help='Temperature for similarity scaling (higher=softer)')
+    parser.add_argument('--similarity_mode', type=str, default='covariance',
+                        choices=['position', 'allpairs', 'covariance'],
+                        help='Similarity mode: covariance (default), allpairs, position')
     parser.add_argument('--grad_clip', type=float, default=1.0,
                         help='Gradient clipping max norm')
     parser.add_argument('--eta_min', type=float, default=1e-5,
@@ -122,6 +125,7 @@ def get_model(args):
         hidden_dim=args.hidden_dim,
         aggregation=args.aggregation,
         topk_ratio=args.topk_ratio,
+        similarity_mode=args.similarity_mode,
         temperature=args.temperature,
         device=str(device)
     )
