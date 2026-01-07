@@ -24,10 +24,11 @@ Usage:
     # Level 4: Logit analysis
     python run_debug.py --level 4
     
-    # Full debug (all levels)
-    python run_debug.py --level all
+    # Full debug (all levels) - saves report to file
+    python run_debug.py --level all --save_report
 """
 import os
+import sys
 import argparse
 import numpy as np
 import torch
@@ -35,6 +36,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from tqdm import tqdm
+from datetime import datetime
+import io
 
 from dataset import load_dataset
 from dataloader.dataloader import FewshotDataset
@@ -43,6 +46,16 @@ from function.debug_utils import print_grad_norm, print_logit_stats, stat
 
 # Model
 from net.usc_mamba_net import USCMambaNet
+
+
+# Global report buffer
+REPORT_BUFFER = []
+
+
+def log(msg=""):
+    """Print and optionally save to report buffer."""
+    print(msg)
+    REPORT_BUFFER.append(msg)
 
 
 def get_args():
@@ -71,6 +84,10 @@ def get_args():
     parser.add_argument('--lr', type=float, default=1e-3)
     parser.add_argument('--iterations', type=int, default=100,
                         help='Number of iterations for overfit test')
+    
+    # Report
+    parser.add_argument('--save_report', action='store_true',
+                        help='Save debug report to file for AI analysis')
     
     return parser.parse_args()
 
@@ -386,19 +403,170 @@ def run_all_levels(args):
         print("\n   Try these ablations:")
         print("   python run_debug.py --level 3 --disable_attention")
         print("   python run_debug.py --level 3 --disable_vss")
+    
+    return success
+
+
+def save_debug_report(args, overfit_success):
+    """Save structured debug report for AI analysis."""
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    report_path = f"debug_report_{timestamp}.md"
+    
+    # Get model info
+    model = DebugUSCMambaNet(print_stats=False)
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    
+    report = f"""# USCMambaNet Debug Report
+
+**Generated:** {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+**Command:** `python run_debug.py --level {args.level} --save_report`
+
+---
+
+## 1. Model Configuration
+
+| Parameter | Value |
+|-----------|-------|
+| Model | USCMambaNet |
+| Input | RGB {args.image_size}×{args.image_size} |
+| Total Params | {total_params:,} |
+| Trainable Params | {trainable_params:,} |
+| Few-shot | {args.way_num}-way {args.shot_num}-shot |
+| Query/Class | {args.query_num} |
+| Learning Rate | {args.lr} |
+| Seed | {args.seed} |
+
+---
+
+## 2. Architecture Summary
+
+```
+Input (B, 3, 64, 64)
+    ↓
+PatchEmbed2D → (B, 32, 64, 64)
+    ↓
+ConvBlock ×2 → (B, 64, 64, 64)
+    ↓
+PatchMerging2D → (B, 128, 32, 32)
+    ↓
+ChannelProj → (B, 64, 32, 32)
+    ↓
+DualBranchFusion → (B, 64, 32, 32)
+  ├── LocalAGLKABranch (DWConv5×5 + DWConv7×7_d2 + Asym1×9 + Asym7×1)
+  └── VSSBlock (4-way SS2D Mamba)
+    ↓
+UnifiedSpatialChannelAttention → (B, 64, 32, 32)
+  - RESIDUAL GATING: X + X⊙A_ch + X⊙A_sp
+    ↓
+SimplePatchSimilarity → (NQ, Way)
+  - aggregation='mean' (100% patches)
+  - temperature=1.0
+```
+
+---
+
+## 3. Debug Results
+
+### Level 2: Overfit Test (CRITICAL)
+
+| Metric | Result |
+|--------|--------|
+| Overfit Success | {'✅ YES' if overfit_success else '❌ NO'} |
+| Iterations | {args.iterations} |
+| Target | acc=100%, loss→0 |
+
+"""
+    
+    if not overfit_success:
+        report += """
+### ⚠️ DIAGNOSIS: Model CANNOT Overfit
+
+**Possible Issues:**
+1. **Similarity Logic Bug** - SimplePatchSimilarity không phân biệt được class
+2. **Feature Collapse** - std < 0.3 ở một stage nào đó
+3. **Gradient Vanishing** - grad ≈ 0 ở nhiều layer
+4. **Label Mismatch** - support/query labels không khớp
+
+**Recommended Actions:**
+```bash
+# Thử tắt UnifiedAttention
+python run_debug.py --level 3 --disable_attention
+
+# Thử tắt VSS (chỉ dùng Conv+LKA)
+python run_debug.py --level 3 --disable_vss
+```
+"""
+    else:
+        report += """
+### ✅ DIAGNOSIS: Model CAN Overfit
+
+Model có khả năng học. Nếu training vẫn không tốt:
+1. Kiểm tra data augmentation
+2. Tăng epochs
+3. Tinh chỉnh hyperparameters (lr, weight_decay)
+"""
+
+    report += """
+---
+
+## 4. Key Hyperparameters to Check
+
+| Setting | Current | Recommended Range |
+|---------|---------|-------------------|
+| aggregation | mean | mean (for debug) |
+| topk_ratio | 1.0 | 0.2-1.0 |
+| temperature | 1.0 | 0.2-1.0 |
+| alpha_residual | 0.1 | 0.05-0.2 |
+
+---
+
+## 5. Console Output Log
+
+```
+"""
+    report += "\n".join(REPORT_BUFFER[-100:])  # Last 100 lines
+    report += """
+```
+
+---
+
+## 6. Next Steps for AI Analysis
+
+If providing this report to an AI:
+1. Share the full report
+2. Share relevant code files if needed:
+   - `net/usc_mamba_net.py`
+   - `net/backbone/dual_branch_fusion.py`
+   - `net/backbone/simple_similarity.py`
+3. Ask specific questions about the debug results
+"""
+    
+    with open(report_path, 'w', encoding='utf-8') as f:
+        f.write(report)
+    
+    print(f"\n📄 Report saved to: {report_path}")
+    return report_path
 
 
 if __name__ == '__main__':
     args = get_args()
     seed_func(args.seed)
     
+    overfit_success = False
+    
     if args.level == '1':
         debug_level_1(args)
     elif args.level == '2':
-        debug_level_2(args)
+        overfit_success = debug_level_2(args)
     elif args.level == '3':
         debug_level_3(args)
     elif args.level == '4':
         debug_level_4(args)
     else:
-        run_all_levels(args)
+        overfit_success = run_all_levels(args)
+    
+    # Save report if requested
+    if args.save_report:
+        save_debug_report(args, overfit_success)
+
