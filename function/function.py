@@ -353,28 +353,45 @@ def plot_tsne(features, labels, num_classes=3, save_path=None):
     width = 7.16  # 2-column: 7.16 inches
     layout_name = '2col'
     if True:  # Keep indentation structure
-        plt.figure(figsize=(width, width))  # Square figure
+        fig, ax = plt.subplots(figsize=(width, width))  # Square figure
         sns.set_style('white')
         
         # Class names mapping
         class_names = ['Corona', 'NotPD', 'Surface', 'Void']
-        # Map numeric labels to class names
-        label_names = [class_names[int(l)] if int(l) < len(class_names) else str(l) for l in labels]
+        unique_labels = sorted(set(labels))
         
-        scatter = sns.scatterplot(
-            x=embedded[:, 0], y=embedded[:, 1],
-            hue=label_names, palette='bright',
-            s=80, alpha=0.8, legend='full', edgecolor='none'
-        )
+        # Use tab10 colormap for distinct colors like reference
+        colors = plt.cm.tab10(np.linspace(0, 1, len(unique_labels)))
         
-        sns.despine()
-        plt.legend(title='Class', bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=12, title_fontsize=13)
-        plt.title('t-SNE', fontsize=14, fontweight='bold')
-        plt.xlabel('Dim 1', fontsize=14)
-        plt.ylabel('Dim 2', fontsize=14)
-        plt.xlim(-50, 50)
-        plt.ylim(-50, 50)
-        plt.tick_params(axis='both', which='major', labelsize=12)
+        # Plot each class
+        for i, label in enumerate(unique_labels):
+            mask = np.array(labels) == label
+            class_name = class_names[int(label)] if int(label) < len(class_names) else str(label)
+            
+            # Scatter plot with WHITE EDGE (like reference)
+            ax.scatter(
+                embedded[mask, 0], embedded[mask, 1],
+                c=[colors[i]], s=40, alpha=0.85,
+                edgecolors='white', linewidths=0.5,
+                label=class_name
+            )
+        # Auto-scale axes based on data (like reference)
+        x_min, x_max = embedded[:, 0].min(), embedded[:, 0].max()
+        y_min, y_max = embedded[:, 1].min(), embedded[:, 1].max()
+        padding = max(x_max - x_min, y_max - y_min) * 0.1
+        ax.set_xlim(x_min - padding, x_max + padding)
+        ax.set_ylim(y_min - padding, y_max + padding)
+        ax.set_xlabel('')
+        ax.set_ylabel('')
+        ax.tick_params(axis='both', which='major', labelsize=10)
+        ax.set_aspect('equal')
+        
+        # Light grid like reference
+        ax.grid(True, alpha=0.3, linestyle='-', linewidth=0.5)
+        ax.set_axisbelow(True)
+        
+        # Legend outside
+        ax.legend(loc='upper right', fontsize=9)
         
         plt.tight_layout()
         if save_path:

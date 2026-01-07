@@ -201,6 +201,21 @@ class LocalAGLKABranch(nn.Module):
             groups=channels, bias=False
         )
         
+        # === Parallel Asymmetric Branch (NEW) ===
+        # DWConv(1×9) for temporal/time-axis awareness
+        self.asym_temporal = nn.Conv2d(
+            channels, channels, kernel_size=(1, 9),
+            padding=(0, 4), groups=channels, bias=False
+        )
+        # DWConv(7×1) for frequency-axis awareness
+        self.asym_frequency = nn.Conv2d(
+            channels, channels, kernel_size=(7, 1),
+            padding=(3, 0), groups=channels, bias=False
+        )
+        # Learnable fusion scalars α, β (initialized to 0.5)
+        self.alpha_temporal = nn.Parameter(torch.tensor(0.5))
+        self.beta_frequency = nn.Parameter(torch.tensor(0.5))
+        
         # Spatial gate: Sigmoid(Linear(GAP))
         self.spatial_gap = nn.AdaptiveAvgPool2d(1)
         self.spatial_gate_fc = nn.Sequential(
@@ -219,7 +234,7 @@ class LocalAGLKABranch(nn.Module):
             x: (B, C, H, W) input features
             
         Returns:
-            (B, C, H, W) output features with AG-LKA
+            (B, C, H, W) output features with AG-LKA + Asymmetric Branches
         """
         B, C, H, W = x.shape
         
@@ -232,8 +247,15 @@ class LocalAGLKABranch(nn.Module):
         # === Local Stem ===
         x2 = self.local_stem(x1)  # DWConv3x3 + SiLU
         
-        # === Large-Kernel Spatial (Multi-scale) ===
-        s = self.lk_conv5(x2) + self.lk_conv7_dilated(x2)  # DWConv5x5 + DWConv7x7_d
+        # === Symmetric Branch: Large-Kernel Spatial (Multi-scale) ===
+        x_sym = self.lk_conv5(x2) + self.lk_conv7_dilated(x2)  # DWConv5x5 + DWConv7x7_d
+        
+        # === Asymmetric Branches (NEW) ===
+        x_t = self.asym_temporal(x2)   # DWConv(1×9) - temporal RF
+        x_f = self.asym_frequency(x2)  # DWConv(7×1) - frequency RF
+        
+        # === Parallel Fusion: X_out = X_sym + α·X_t + β·X_f ===
+        s = x_sym + self.alpha_temporal * x_t + self.beta_frequency * x_f
         
         # === Spatial Gate ===
         # g = Sigmoid(Linear(GAP(X2)))
