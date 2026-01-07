@@ -30,12 +30,44 @@ try:
 except ImportError:
     MAMBA_AVAILABLE = False
 
-# Import ChannelMamba for slot-free architecture option
-try:
-    from net.backbone.channel_mamba import ChannelMamba
-    CHANNEL_MAMBA_AVAILABLE = True
-except ImportError:
-    CHANNEL_MAMBA_AVAILABLE = False
+
+# =============================================================================
+# ResidualChannelMix - Simple conv1x1 channel mixing (ConvNeXt-style)
+# =============================================================================
+
+class ResidualChannelMix(nn.Module):
+    """Residual 1×1 Channel Mixing (NO attention, NO gating).
+    
+    Simple channel interaction following ConvNeXt/MetaFormer design:
+        Y = X + α · Mix(X)
+        Mix(X) = SiLU(GroupNorm(Conv1×1(X)))
+    
+    Why this is the BEST choice:
+        - True channel mixing (not attention)
+        - No memory state (unlike Mamba)
+        - No gating/sigmoid (no conflict with ECA++)
+        - Very stable for few-shot
+    
+    Args:
+        channels: Number of input/output channels
+        alpha_init: Initial residual scaling (default: 0.1)
+    """
+    
+    def __init__(self, channels: int, alpha_init: float = 0.1):
+        super().__init__()
+        
+        self.mix = nn.Sequential(
+            nn.Conv2d(channels, channels, kernel_size=1, bias=False),
+            nn.GroupNorm(num_groups=min(8, channels // 4), num_channels=channels),
+            nn.SiLU(inplace=True)
+        )
+        
+        # Learnable residual scaling
+        self.alpha = nn.Parameter(torch.tensor(alpha_init))
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Y = X + α · Mix(X)"""
+        return x + self.alpha * self.mix(x)
 
 
 # =============================================================================
@@ -176,17 +208,10 @@ class LocalAGLKABranch(nn.Module):
             nn.Sigmoid()
         )
         
-        # Channel mixing: ChannelMamba (ADD-based ONLY)
-        # REMOVED ECA++ - ChannelMamba is the default and only option
-        if not CHANNEL_MAMBA_AVAILABLE:
-            raise ImportError(
-                "ChannelMamba required but mamba-ssm not available. "
-                "Install with: pip install mamba-ssm"
-            )
-        self.channel_mix = ChannelMamba(channels, d_state=4)
-        
-        # Learnable residual scaling
-        self.alpha = nn.Parameter(torch.tensor(0.1))
+        # Channel mixing: Residual Conv1x1 (ConvNeXt-style)
+        # Simple: Y = X + α·SiLU(GroupNorm(Conv1x1(X)))
+        # No Mamba, no gating, pure channel interaction
+        self.channel_mix = ResidualChannelMix(channels, alpha_init=0.1)
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -216,11 +241,11 @@ class LocalAGLKABranch(nn.Module):
         g = self.spatial_gate_fc(g).view(B, C, 1, 1)  # (B, C, 1, 1)
         s = s * g  # Spatial gating
         
-        # === Channel Mixing (ChannelMamba ADD) ===
-        f = self.channel_mix(s)  # Y = S + α·Mix(S)
+        # === Channel Mixing (Residual Conv1x1) ===
+        f = self.channel_mix(s)  # Y = S + α·Mix(S), no external residual needed
         
-        # === Residual ===
-        y = x + self.alpha * f
+        # === Final Residual (from input) ===
+        y = x + 0.1 * f  # Weak residual from original input
         
         return y
 

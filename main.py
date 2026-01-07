@@ -90,10 +90,10 @@ def get_args():
                         help='Temperature for similarity scaling (higher=softer)')
     parser.add_argument('--grad_clip', type=float, default=1.0,
                         help='Gradient clipping max norm')
-    parser.add_argument('--step_size', type=int, default=10,
-                        help='StepLR step size (epochs)')
-    parser.add_argument('--gamma', type=float, default=0.1,
-                        help='StepLR gamma (LR multiplier)')
+    parser.add_argument('--eta_min', type=float, default=1e-5,
+                        help='Min LR for CosineAnnealingLR')
+    parser.add_argument('--weight_decay', type=float, default=1e-4,
+                        help='Weight decay for optimizer')
     parser.add_argument('--seed', type=int, default=42)
     
     # Loss
@@ -148,18 +148,18 @@ def train_loop(net, train_loader, val_X, val_y, args):
         
     criterion_center = CenterLoss(num_classes=args.way_num, feat_dim=feat_dim, device=device)
     
-    # Optimizer
-    optimizer = optim.Adam([
+    # Optimizer with weight decay
+    optimizer = optim.AdamW([
         {'params': net.parameters()},
         {'params': criterion_center.parameters()}
-    ], lr=args.lr)
+    ], lr=args.lr, weight_decay=args.weight_decay)
     
-    # StepLR Scheduler - simple step decay
-    # LR = 0.001, gamma = 0.1, step_size = 10 epochs
-    scheduler = lr_scheduler.StepLR(
-        optimizer, 
-        step_size=args.step_size,  # Decay every 10 epochs
-        gamma=args.gamma  # Multiply by 0.1
+    # CosineAnnealingLR Scheduler (sync with main branch)
+    # LR decays from lr to eta_min over T_max epochs following cosine curve
+    scheduler = lr_scheduler.CosineAnnealingLR(
+        optimizer,
+        T_max=args.num_epochs,
+        eta_min=args.eta_min
     )
     
     # Training history
