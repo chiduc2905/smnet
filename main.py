@@ -141,13 +141,8 @@ def train_loop(net, train_loader, val_X, val_y, args):
     """Train with CosineAnnealingLR + Warmup (per-iteration LR adjustment)."""
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
-    # Loss functions - use MarginContrastiveLoss if margin > 0
-    if args.margin > 0:
-        criterion_main = MarginContrastiveLoss(margin=args.margin).to(device)
-        print(f"Using MarginContrastiveLoss with margin={args.margin}")
-    else:
-        criterion_main = ContrastiveLoss().to(device)
-        print("Using ContrastiveLoss (no margin)")
+    # Loss: Simple CrossEntropy (no margin, no contrastive, no cosine)
+    print("Using F.cross_entropy (standard CE loss)")
     
     # Calculate feature dimension dynamically
     # USCMambaNet.encode() returns (B, hidden_dim, H', W')
@@ -208,8 +203,8 @@ def train_loop(net, train_loader, val_X, val_y, args):
                 train_correct += (preds == targets).sum().item()
                 train_total += targets.size(0)
             
-            # Main Loss (CrossEntropy via ContrastiveLoss)
-            loss_main = criterion_main(scores, targets)
+            # Main Loss: Standard CrossEntropy (no margin, no contrastive)
+            loss_main = F.cross_entropy(scores, targets)
             
             # Center Loss (optional)
             if args.lambda_center > 0:
