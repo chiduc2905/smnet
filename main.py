@@ -30,7 +30,7 @@ except ImportError:
 from dataset import load_dataset
 from dataloader.dataloader import FewshotDataset
 from function.function import (
-    ContrastiveLoss, CenterLoss, seed_func,
+    ContrastiveLoss, MarginContrastiveLoss, CenterLoss, seed_func,
     plot_confusion_matrix, plot_tsne, plot_training_curves
 )
 from function.debug_utils import print_grad_norm, print_logit_stats, set_debug_mode, is_debug_mode
@@ -97,6 +97,8 @@ def get_args():
     # Loss
     parser.add_argument('--lambda_center', type=float, default=0.0, 
                         help='Weight for Center Loss (default: 0.0, disabled)')
+    parser.add_argument('--margin', type=float, default=0.2,
+                        help='CosFace margin for correct class (default: 0.2). Set to 0 to disable.')
     
     # Debug
     parser.add_argument('--debug', action='store_true',
@@ -135,8 +137,13 @@ def train_loop(net, train_loader, val_X, val_y, args):
     """Train with CosineAnnealingLR + Warmup (per-iteration LR adjustment)."""
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
-    # Loss functions
-    criterion_main = ContrastiveLoss().to(device)
+    # Loss functions - use MarginContrastiveLoss if margin > 0
+    if args.margin > 0:
+        criterion_main = MarginContrastiveLoss(margin=args.margin).to(device)
+        print(f"Using MarginContrastiveLoss with margin={args.margin}")
+    else:
+        criterion_main = ContrastiveLoss().to(device)
+        print("Using ContrastiveLoss (no margin)")
     
     # Calculate feature dimension dynamically
     # USCMambaNet.encode() returns (B, hidden_dim, H', W')

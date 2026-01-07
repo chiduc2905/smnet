@@ -40,6 +40,51 @@ class ContrastiveLoss(nn.Module):
         return loss
 
 
+class MarginContrastiveLoss(nn.Module):
+    """CosFace-style margin loss for few-shot classification.
+    
+    Applies margin penalty to correct class score to enforce clear separation:
+        s_y = cos(q, s_y) - m    (correct class)
+        s_k = cos(q, s_k)        (wrong classes)
+    
+    This prevents "draw" situations where all classes have similar scores.
+    
+    Reference: Wang et al. "CosFace: Large Margin Cosine Loss for Deep Face Recognition" (CVPR 2018)
+    
+    Args:
+        margin: Margin to subtract from correct class score (default: 0.2)
+    """
+    
+    def __init__(self, margin: float = 0.2):
+        super().__init__()
+        self.margin = margin
+    
+    def forward(self, scores, targets):
+        """
+        Args:
+            scores: (N, way_num) similarity scores
+            targets: (N,) class labels
+            
+        Returns:
+            loss: Cross-entropy loss with margin penalty on correct class
+        """
+        N, way_num = scores.shape
+        
+        # Create one-hot mask for correct class
+        one_hot = torch.zeros_like(scores)
+        one_hot.scatter_(1, targets.view(-1, 1), 1)
+        
+        # Apply margin: subtract m from correct class score
+        # s_y = s_y - m, s_k = s_k (unchanged)
+        scores_with_margin = scores - one_hot * self.margin
+        
+        # Standard cross-entropy
+        log_probs = torch.log_softmax(scores_with_margin, dim=1)
+        loss = -log_probs.gather(1, targets.view(-1, 1)).mean()
+        
+        return loss
+
+
 class RelationLoss(nn.Module):
     """MSE loss for Relation Networks.
     
