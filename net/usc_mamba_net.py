@@ -150,7 +150,7 @@ class USCMambaNet(nn.Module):
         elif similarity_mode == 'allpairs':
             self.similarity = AllPairsSimilarity(temperature=temperature)
         elif similarity_mode == 'covariance':
-            self.similarity = CovarianceSimilarity(logit_scale=10.0)
+            self.similarity = CovarianceSimilarity()  # No logit_scale
         else:
             raise ValueError(f"Unknown similarity_mode: {similarity_mode}")
         

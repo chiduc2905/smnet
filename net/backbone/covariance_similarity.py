@@ -4,12 +4,13 @@ Formula:
     Σ = (X - mean(X)) @ (X - mean(X))^T / (N-1)   # (C, C) covariance
     Y = Σ @ Q                                       # (C, d)
     F = (Q * Y).sum(dim=0)                          # (d,) - efficient diag
-    score = mean(F) * logit_scale
+    score = mean(F)
 
 CRITICAL:
     - NO L2-normalize on query
     - Center SUPPORT only, NOT query
     - Vectorized implementation (no loop)
+    - NO logit_scale (covariance already large)
 """
 import torch
 import torch.nn as nn
@@ -17,22 +18,20 @@ import torch.nn.functional as F
 
 
 class CovarianceSimilarity(nn.Module):
-    """Covariance-based similarity metric (VECTORIZED VERSION).
+    """Covariance-based similarity metric.
     
     Pipeline (per class):
         1. Compute covariance matrix Σ from support patches (centered)
         2. Y = Σ @ Q_all (VECTORIZED, no loop)
         3. F = (Q * Y).sum(dim=1) - efficient diag
-        4. score = mean(F) * logit_scale
+        4. score = mean(F)
     
     Args:
-        logit_scale: Initial logit scale for boosting CE gradient (default: 10.0)
         eps: Small constant for numerical stability (default: 1e-8)
     """
     
-    def __init__(self, logit_scale: float = 10.0, eps: float = 1e-8):
+    def __init__(self, eps: float = 1e-8):
         super().__init__()
-        self.logit_scale = nn.Parameter(torch.tensor(logit_scale))
         self.eps = eps
     
     def compute_covariance(self, support_features: torch.Tensor) -> torch.Tensor:
@@ -91,10 +90,7 @@ class CovarianceSimilarity(nn.Module):
         # F_all = (Q * Y).sum(dim=1) - this is diag(Q^T Σ Q) for each query
         F_all = (Q_all * Y_all).sum(dim=1)  # (NQ, d)
         
-        # Mean over spatial locations
+        # Mean over spatial locations - NO logit_scale!
         scores = F_all.mean(dim=1)  # (NQ,)
-        
-        # Apply learnable logit scale
-        scores = scores * self.logit_scale
         
         return scores
