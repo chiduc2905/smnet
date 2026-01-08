@@ -65,8 +65,10 @@ def get_args():
     parser.add_argument('--way_num', type=int, default=4)
     parser.add_argument('--shot_num', type=int, default=1)
     parser.add_argument('--query_num', type=int, default=5, help='Queries per class (same for train/val/test)')
-    parser.add_argument('--image_size', type=int, default=64,
-                        help='Input image size')
+    parser.add_argument('--selected_classes', type=str, default=None,
+                        help='Comma-separated class indices to use (e.g. "0,1" for first 2 classes). If None, use all classes.')
+    parser.add_argument('--image_size', type=int, default=128,
+                        help='Input image size (default: 128)')
     
     # Training
     parser.add_argument('--training_samples', type=int, default=None, 
@@ -80,8 +82,8 @@ def get_args():
     parser.add_argument('--min_lr', type=float, default=1e-5, help='Min LR for cosine')
     parser.add_argument('--start_lr', type=float, default=1e-5, help='Start LR for warmup')
     parser.add_argument('--warmup_iters', type=int, default=500, help='Warmup iterations')
-    parser.add_argument('--temperature', type=float, default=1.0,
-                        help='Temperature for cosine similarity scaling')
+    parser.add_argument('--temperature', type=float, default=10.0,
+                        help='Logit scale τ (logit = cosine * τ, recommended: 10-30)')
     parser.add_argument('--outlier_fraction', type=float, default=0.2,
                         help='Fraction of outliers to remove in 5-shot (0.0 to disable)')
     parser.add_argument('--grad_clip', type=float, default=1.0,
@@ -507,6 +509,38 @@ def main():
     train_X, train_y = to_tensor(dataset.X_train, dataset.y_train)
     val_X, val_y = to_tensor(dataset.X_val, dataset.y_val)
     test_X, test_y = to_tensor(dataset.X_test, dataset.y_test)
+    
+    # ============================================================
+    # Filter to selected classes if specified
+    # ============================================================
+    if args.selected_classes:
+        selected = [int(c.strip()) for c in args.selected_classes.split(',')]
+        print(f"\n⚠️ Using only selected classes: {selected}")
+        
+        # Update way_num to match selected classes
+        args.way_num = len(selected)
+        print(f"   way_num updated to {args.way_num}")
+        
+        def filter_classes(X, y, selected_classes):
+            """Filter data to only include selected classes and remap labels."""
+            mask = torch.zeros(len(y), dtype=torch.bool)
+            for c in selected_classes:
+                mask |= (y == c)
+            
+            X_filtered = X[mask]
+            y_filtered = y[mask]
+            
+            # Remap labels to 0, 1, 2, ... (contiguous)
+            label_map = {old: new for new, old in enumerate(selected_classes)}
+            y_remapped = torch.tensor([label_map[yi.item()] for yi in y_filtered])
+            
+            return X_filtered, y_remapped
+        
+        train_X, train_y = filter_classes(train_X, train_y, selected)
+        val_X, val_y = filter_classes(val_X, val_y, selected)
+        test_X, test_y = filter_classes(test_X, test_y, selected)
+        
+        print(f"   Train: {len(train_X)}, Val: {len(val_X)}, Test: {len(test_X)}")
     
     # Limit training samples if specified
     if args.training_samples:

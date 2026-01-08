@@ -145,34 +145,40 @@ class ECAPlus(nn.Module):
 class LocalAGLKABranch(nn.Module):
     """Attention-Guided Large Kernel Attention (AG-LKA) Branch.
     
-    Replaces ConvMixer++ with a more powerful large-kernel attention mechanism.
+    Multi-scale local-to-mid-range spatial feature extraction with asymmetric
+    convolutions for scalogram processing (time × frequency axes).
     
-    Architecture (following user pseudocode):
+    Architecture (optimized for 128×128 input):
         X1 = Norm(X)
         
         # Local stem
         X2 = DWConv3x3(X1) → SiLU
         
-        # Large-kernel spatial (multi-scale)
-        S = DWConv5x5(X2) + DWConv7x7_dilated(X2)
+        # Multi-scale 5×5 with different dilations
+        # Effective RF: 5 (dil1), 9 (dil2), 13 (dil3)
+        S = DWConv5x5_d1(X2) + DWConv5x5_d2(X2) + DWConv5x5_d3(X2)
+        
+        # Asymmetric branches for time-frequency awareness
+        A = DWConv1×7(X2) + DWConv5×1(X2)
+        
+        # Fusion
+        F = S + A
         
         # Spatial gate
         g = Sigmoid(Linear(GAP(X2)))
-        S = S * g
+        F = F * g
         
-        # Channel interaction (ECA++)
-        c = Sigmoid(Conv1D(GAP(S)))
-        F = S * c
+        # Channel mixing
+        Y = ChannelMix(F)
         
         # Residual
-        Y = X + α·F
+        Output = X + α·Y
     
     Args:
         channels: Number of input/output channels
-        dilation: Dilation for 7x7 conv (default: 2)
     """
     
-    def __init__(self, channels: int, dilation: int = 2, **kwargs):
+    def __init__(self, channels: int, **kwargs):
         super().__init__()
         
         self.channels = channels
@@ -187,32 +193,40 @@ class LocalAGLKABranch(nn.Module):
             nn.SiLU(inplace=True)
         )
         
-        # Large-kernel spatial: DWConv 5x5
-        self.lk_conv5 = nn.Conv2d(
+        # === Multi-scale 5×5 with dilations ===
+        # Dilation 1: Effective RF = 5, captures local details
+        self.lk_conv5_d1 = nn.Conv2d(
             channels, channels, kernel_size=5,
-            padding=2, groups=channels, bias=False
-        )
-        
-        # Large-kernel spatial: DWConv 7x7 dilated
-        # Effective RF: 7 + (7-1)*(dilation-1) = 7 + 6*(2-1) = 13 with dilation=2
-        self.lk_conv7_dilated = nn.Conv2d(
-            channels, channels, kernel_size=7,
-            padding=3 * dilation, dilation=dilation, 
+            padding=2, dilation=1,
             groups=channels, bias=False
         )
         
-        # === Parallel Asymmetric Branch (NEW) ===
-        # DWConv(1×9) for temporal/time-axis awareness
+        # Dilation 2: Effective RF = 9, captures mid-range patterns
+        self.lk_conv5_d2 = nn.Conv2d(
+            channels, channels, kernel_size=5,
+            padding=4, dilation=2,
+            groups=channels, bias=False
+        )
+        
+        # Dilation 3: Effective RF = 13, captures larger context
+        self.lk_conv5_d3 = nn.Conv2d(
+            channels, channels, kernel_size=5,
+            padding=6, dilation=3,
+            groups=channels, bias=False
+        )
+        
+        # === Asymmetric Branches for Scalogram ===
+        # DWConv(1×7) for temporal/time-axis awareness (horizontal)
         self.asym_temporal = nn.Conv2d(
-            channels, channels, kernel_size=(1, 9),
-            padding=(0, 4), groups=channels, bias=False
+            channels, channels, kernel_size=(1, 7),
+            padding=(0, 3), groups=channels, bias=False
         )
-        # DWConv(7×1) for frequency-axis awareness
+        
+        # DWConv(5×1) for frequency-axis awareness (vertical)
         self.asym_frequency = nn.Conv2d(
-            channels, channels, kernel_size=(7, 1),
-            padding=(3, 0), groups=channels, bias=False
+            channels, channels, kernel_size=(5, 1),
+            padding=(2, 0), groups=channels, bias=False
         )
-        # NOTE: α, β removed for debugging - using simple addition
         
         # Spatial gate: Sigmoid(Linear(GAP))
         self.spatial_gap = nn.AdaptiveAvgPool2d(1)
@@ -222,8 +236,6 @@ class LocalAGLKABranch(nn.Module):
         )
         
         # Channel mixing: Residual Conv1x1 (ConvNeXt-style)
-        # Simple: Y = X + α·SiLU(GroupNorm(Conv1x1(X)))
-        # No Mamba, no gating, pure channel interaction
         self.channel_mix = ResidualChannelMix(channels, alpha_init=0.1)
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -232,12 +244,11 @@ class LocalAGLKABranch(nn.Module):
             x: (B, C, H, W) input features
             
         Returns:
-            (B, C, H, W) output features with AG-LKA + Asymmetric Branches
+            (B, C, H, W) output features with multi-scale + asymmetric
         """
         B, C, H, W = x.shape
         
         # === Pre-Normalization ===
-        # Need to reshape for LayerNorm: (B, C, H, W) -> (B, H, W, C)
         x1 = x.permute(0, 2, 3, 1)  # (B, H, W, C)
         x1 = self.norm(x1)
         x1 = x1.permute(0, 3, 1, 2)  # (B, C, H, W)
@@ -245,27 +256,27 @@ class LocalAGLKABranch(nn.Module):
         # === Local Stem ===
         x2 = self.local_stem(x1)  # DWConv3x3 + SiLU
         
-        # === Symmetric Branch: Large-Kernel Spatial (Multi-scale) ===
-        x_sym = self.lk_conv5(x2) + self.lk_conv7_dilated(x2)  # DWConv5x5 + DWConv7x7_d
+        # === Multi-scale 5×5 Branch ===
+        # Combines local, mid-range, and larger context
+        x_ms = self.lk_conv5_d1(x2) + self.lk_conv5_d2(x2) + self.lk_conv5_d3(x2)
         
-        # === Asymmetric Branches (NEW) ===
-        x_t = self.asym_temporal(x2)   # DWConv(1×9) - temporal RF
-        x_f = self.asym_frequency(x2)  # DWConv(7×1) - frequency RF
+        # === Asymmetric Branches ===
+        x_t = self.asym_temporal(x2)   # DWConv(1×7) - time axis
+        x_f = self.asym_frequency(x2)  # DWConv(5×1) - frequency axis
         
-        # === Parallel Fusion: SIMPLE ADDITION (no α, β for debugging) ===
-        s = x_sym + x_t + x_f
+        # === Parallel Fusion ===
+        s = x_ms + x_t + x_f
         
         # === Spatial Gate ===
-        # g = Sigmoid(Linear(GAP(X2)))
         g = self.spatial_gap(x2).view(B, C)  # (B, C)
         g = self.spatial_gate_fc(g).view(B, C, 1, 1)  # (B, C, 1, 1)
         s = s * g  # Spatial gating
         
-        # === Channel Mixing (Residual Conv1x1) ===
-        f = self.channel_mix(s)  # Y = S + α·Mix(S), no external residual needed
+        # === Channel Mixing ===
+        f = self.channel_mix(s)  # Y = S + α·Mix(S)
         
-        # === Final Residual (from input) ===
-        y = x + 0.1 * f  # Weak residual from original input
+        # === Final Residual ===
+        y = x + 0.1 * f
         
         return y
 

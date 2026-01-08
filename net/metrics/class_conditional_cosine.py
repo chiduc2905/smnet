@@ -164,8 +164,8 @@ class ClassConditionalCosine(nn.Module):
             # (NQ, C) @ (C,) -> (NQ,)
             sim = torch.mv(q_reweighted, p_c)  # (NQ,)
             
-            # Temperature scaling
-            sim = sim / self.temperature
+            # Logit scaling: logit = cosine * τ (τ ∈ [10, 30] recommended)
+            sim = sim * self.temperature
             
             scores.append(sim)
         
@@ -218,8 +218,8 @@ class ClassConditionalCosine(nn.Module):
         # (NQ, Way, C) * (1, Way, C) -> sum over C -> (NQ, Way)
         scores = (q_reweighted * prototypes_exp).sum(dim=-1)  # (NQ, Way)
         
-        # Temperature scaling
-        scores = scores / self.temperature
+        # Logit scaling: logit = cosine * τ
+        scores = scores * self.temperature
         
         return scores
 

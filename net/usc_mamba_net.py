@@ -108,7 +108,7 @@ class USCMambaNet(nn.Module):
         
         # ============================================================
         # STAGE 2: ConvBlocks (preserve spatial, increase channels)
-        # (B, 32, 64, 64) → (B, 64, 64, 64)
+        # (B, 32, 128, 128) → (B, 64, 128, 128)
         # ============================================================
         self.conv_blocks = nn.Sequential(
             ConvBlock(base_dim, base_dim * 2),      # 32 → 64
@@ -117,7 +117,7 @@ class USCMambaNet(nn.Module):
         
         # ============================================================
         # STAGE 3: Single PatchMerging (spatial /2, channels ×2)
-        # (B, 64, 64, 64) → (B, 128, 32, 32)
+        # (B, 64, 128, 128) → (B, 128, 64, 64)
         # ============================================================
         self.patch_merge = PatchMerging2D(dim=base_dim * 2, norm_layer=nn.LayerNorm)
         
@@ -163,13 +163,13 @@ class USCMambaNet(nn.Module):
         Returns:
             features: (B, hidden_dim, H', W') encoded features
         """
-        # Stage 1: Patch embedding (B, 3, 64, 64) → (B, 32, 64, 64)
+        # Stage 1: Patch embedding (B, 3, 128, 128) → (B, 32, 128, 128)
         f = self.patch_embed(x)
         
-        # Stage 2: ConvBlocks (preserve spatial) (B, 32, 64, 64) → (B, 64, 64, 64)
+        # Stage 2: ConvBlocks (preserve spatial) (B, 32, 128, 128) → (B, 64, 128, 128)
         f = self.conv_blocks(f)
         
-        # Stage 3: Single PatchMerging (B, 64, 64, 64) → (B, 128, 32, 32)
+        # Stage 3: Single PatchMerging (B, 64, 128, 128) → (B, 128, 64, 64)
         f = self.patch_merge(f)
         
         # Stage 4: Channel projection (residual-friendly)

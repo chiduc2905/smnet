@@ -39,7 +39,7 @@ def run_experiment(model, shot, samples, dataset_path, dataset_name, project):
         '--shot_num', str(shot),
         '--way_num', '4',
         '--query_num', str(QUERY_NUM),
-        '--image_size', '64',
+        '--image_size', '128',
         '--mode', 'train',
         '--project', project,
         '--dataset_path', dataset_path,
