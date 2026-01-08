@@ -11,6 +11,15 @@ from .local_knn import LocalKNN, local_knn_score
 from .emd import SinkhornDistance, sinkhorn_distance
 from .learned_distance import LearnedDistance
 from .transformer import SetTransformer
+from .prototype_refinement import (
+    refine_prototype,
+    refine_prototype_weighted,
+    compute_class_prototypes
+)
+from .class_conditional_cosine import (
+    ClassConditionalCosine,
+    ClassConditionalCosineWithPatches
+)
 
 __all__ = [
     # Distance/Similarity functions
@@ -27,4 +36,11 @@ __all__ = [
     'sinkhorn_distance',
     'LearnedDistance',
     'SetTransformer',
+    # Prototype refinement
+    'refine_prototype',
+    'refine_prototype_weighted',
+    'compute_class_prototypes',
+    # Class-conditional cosine
+    'ClassConditionalCosine',
+    'ClassConditionalCosineWithPatches',
 ]
