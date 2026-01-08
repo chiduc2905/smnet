@@ -220,17 +220,25 @@ class USCMambaNet(nn.Module):
             if self.similarity_mode == 'covariance' and self.similarity is None:
                 self.similarity = CovarianceSimilarity().to(q_features.device)
             
-            scores_per_class = []
-            for w in range(Way):
-                # Encode support for class w: (Shot, C, H, W) -> (Shot, hidden, H', W')
-                s_features = self.encode(support[b, w])
+            if self.similarity_mode == 'covariance':
+                # Covariance mode: collect F values, then aggregate
+                F_per_class = []
+                for w in range(Way):
+                    s_features = self.encode(support[b, w])
+                    F_w = self.similarity(q_features, s_features)  # (NQ, d)
+                    F_per_class.append(F_w)
                 
-                # Compute similarity
-                sim = self.similarity(q_features, s_features)  # (NQ,)
-                scores_per_class.append(sim)
+                # Aggregate to logits using Conv1d
+                scores_per_class = self.similarity.aggregate_to_logits(F_per_class)  # (NQ, Way)
+            else:
+                # Other modes: direct similarity scores
+                scores_per_class = []
+                for w in range(Way):
+                    s_features = self.encode(support[b, w])
+                    sim = self.similarity(q_features, s_features)  # (NQ,)
+                    scores_per_class.append(sim)
+                scores_per_class = torch.stack(scores_per_class, dim=1)  # (NQ, Way)
             
-            # Stack: (NQ, Way)
-            scores_per_class = torch.stack(scores_per_class, dim=1)
             all_scores.append(scores_per_class)
         
         return torch.cat(all_scores, dim=0)  # (B*NQ, Way)
