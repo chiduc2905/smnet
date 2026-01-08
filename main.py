@@ -56,14 +56,10 @@ def get_args():
                         help='Dataset name for checkpoint naming')
     
     # Model
-    parser.add_argument('--model', type=str, default='smnet', 
+    parser.add_argument('--model', type=str, default='uscmamba', 
                         choices=['uscmamba'])
     parser.add_argument('--hidden_dim', type=int, default=64,
                         help='Hidden dimension for feature extractor')
-    parser.add_argument('--aggregation', type=str, default='topk',
-                        choices=['mean', 'topk'], help='Similarity aggregation')
-    parser.add_argument('--topk_ratio', type=float, default=0.2,
-                        help='Top-k ratio for similarity aggregation')
     
     # Few-shot settings
     parser.add_argument('--way_num', type=int, default=4)
@@ -84,11 +80,10 @@ def get_args():
     parser.add_argument('--min_lr', type=float, default=1e-5, help='Min LR for cosine')
     parser.add_argument('--start_lr', type=float, default=1e-5, help='Start LR for warmup')
     parser.add_argument('--warmup_iters', type=int, default=500, help='Warmup iterations')
-    parser.add_argument('--temperature', type=float, default=0.5,
-                        help='Temperature for similarity scaling (higher=softer)')
-    parser.add_argument('--similarity_mode', type=str, default='covariance',
-                        choices=['position', 'allpairs', 'covariance'],
-                        help='Similarity mode: covariance (default), allpairs, position')
+    parser.add_argument('--temperature', type=float, default=1.0,
+                        help='Temperature for cosine similarity scaling')
+    parser.add_argument('--outlier_fraction', type=float, default=0.2,
+                        help='Fraction of outliers to remove in 5-shot (0.0 to disable)')
     parser.add_argument('--grad_clip', type=float, default=1.0,
                         help='Gradient clipping max norm')
     parser.add_argument('--eta_min', type=float, default=1e-5,
@@ -123,10 +118,8 @@ def get_model(args):
     model = USCMambaNet(
         in_channels=3,  # RGB input
         hidden_dim=args.hidden_dim,
-        aggregation=args.aggregation,
-        topk_ratio=args.topk_ratio,
-        similarity_mode=args.similarity_mode,
         temperature=args.temperature,
+        outlier_fraction=args.outlier_fraction,
         device=str(device)
     )
     

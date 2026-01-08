@@ -48,8 +48,8 @@ def run_experiment(model, shot, samples, dataset_path, dataset_name, project):
         '--lr', '1e-3',
         '--eta_min', '1e-5',
         '--weight_decay', '1e-4',
-        '--margin', '0',  # No margin with covariance (already breaks symmetry)
-        '--similarity_mode', 'covariance',  # Covariance-based similarity
+        '--margin', '0',  # No margin needed (ClassConditionalCosine handles discrimination)
+        '--outlier_fraction', '0.2',  # Remove 20% outliers in 5-shot
         '--episode_num_train', '100',
         '--episode_num_val', '150',
         '--episode_num_test', '150',
