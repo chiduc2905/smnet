@@ -8,7 +8,7 @@ def get_args():
     parser = argparse.ArgumentParser(description='Run all USCMambaNet experiments')
     parser.add_argument('--project', type=str, default='uscmamba', help='WandB project name')
     parser.add_argument('--dataset_path', type=str, 
-                        default='./scalogram_minh',
+                        default='/mnt/disk2/nhatnc/res/scalogram_fewshot/proposed_model/smnet/scalogram_v2_split',
                         help='Path to dataset')
     parser.add_argument('--dataset_name', type=str, default='minh', help='Dataset name for logging')
     return parser.parse_args()

@@ -36,7 +36,7 @@ def get_args():
     parser = argparse.ArgumentParser(description='SMNet Ablation Training')
     
     # Paths
-    parser.add_argument('--dataset_path', type=str, default='./scalogram_minh/')
+    parser.add_argument('--dataset_path', type=str, default='/mnt/disk2/nhatnc/res/scalogram_fewshot/proposed_model/smnet/scalogram_v2_split')
     parser.add_argument('--path_weights', type=str, default='checkpoints/')
     parser.add_argument('--path_results', type=str, default='results/')
     parser.add_argument('--dataset_name', type=str, default='minh')

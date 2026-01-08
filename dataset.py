@@ -13,7 +13,7 @@ from PIL import Image
 import torchvision.transforms as transforms
 
 
-CLASS_MAP = {'corona': 0, 'hf_nopd': 1, 'surface': 2, 'void': 3}
+CLASS_MAP = {'corona': 0, 'notpd': 1, 'surface': 2, 'void': 3}
 
 
 class PDScalogramPreSplit:

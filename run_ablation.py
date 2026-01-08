@@ -31,7 +31,7 @@ class AblationConfig:
     """Unified ablation configuration."""
     
     # Dataset
-    dataset_path: str = './scalogram_minh'
+    dataset_path: str = '/mnt/disk2/nhatnc/res/scalogram_fewshot/proposed_model/smnet/scalogram_v2_split'
     dataset_name: str = 'minh'
     
     # Few-shot settings
@@ -283,7 +283,7 @@ def get_args():
                         choices=['dual_branch', 'slot_refinement', 'slot_attention', 'saff', 'all'],
                         help='Which ablation to run')
     
-    parser.add_argument('--dataset_path', type=str, default='./scalogram_minh')
+    parser.add_argument('--dataset_path', type=str, default='/mnt/disk2/nhatnc/res/scalogram_fewshot/proposed_model/smnet/scalogram_v2_split')
     parser.add_argument('--dataset_name', type=str, default='minh')
     parser.add_argument('--project', type=str, default='smnet-ablation')
     
