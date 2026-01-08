@@ -141,6 +141,8 @@ class USCMambaNet(nn.Module):
         # ============================================================
         # STAGE 6: Similarity (NON-learnable)
         # ============================================================
+        self.similarity_mode = similarity_mode  # Store for forward()
+        
         if similarity_mode == 'position':
             self.similarity = SimplePatchSimilarity(
                 aggregation=aggregation,
@@ -150,7 +152,8 @@ class USCMambaNet(nn.Module):
         elif similarity_mode == 'allpairs':
             self.similarity = AllPairsSimilarity(temperature=temperature)
         elif similarity_mode == 'covariance':
-            self.similarity = CovarianceSimilarity()  # No logit_scale
+            # Parameters will be set in forward based on feature size
+            self.similarity = None
         else:
             raise ValueError(f"Unknown similarity_mode: {similarity_mode}")
         
@@ -213,17 +216,29 @@ class USCMambaNet(nn.Module):
             # Encode queries: (NQ, C, H, W) -> (NQ, hidden, H', W')
             q_features = self.encode(query[b])
             
-            scores_per_class = []
-            for w in range(Way):
-                # Encode support for class w: (Shot, C, H, W) -> (Shot, hidden, H', W')
-                s_features = self.encode(support[b, w])
+            if self.similarity_mode == 'covariance':
+                # Encode all support classes
+                support_list = []
+                for w in range(Way):
+                    s_features = self.encode(support[b, w])  # (Shot, hidden, H', W')
+                    support_list.append(s_features)
                 
-                # Compute similarity (non-learnable)
-                sim = self.similarity(q_features, s_features)  # (NQ,)
-                scores_per_class.append(sim)
+                # Initialize CovarianceSimilarity with correct feature size if needed
+                _, _, Hf, Wf = q_features.shape
+                if self.similarity is None:
+                    self.similarity = CovarianceSimilarity(h=Hf, w=Wf, way_num=Way).to(q_features.device)
+                
+                # Get scores directly: (NQ, Way)
+                scores_per_class = self.similarity(q_features, support_list)
+            else:
+                # Original per-class loop for other similarity modes
+                scores_per_class = []
+                for w in range(Way):
+                    s_features = self.encode(support[b, w])
+                    sim = self.similarity(q_features, s_features)  # (NQ,)
+                    scores_per_class.append(sim)
+                scores_per_class = torch.stack(scores_per_class, dim=1)  # (NQ, Way)
             
-            # Stack: (NQ, Way)
-            scores_per_class = torch.stack(scores_per_class, dim=1)
             all_scores.append(scores_per_class)
         
         return torch.cat(all_scores, dim=0)  # (B*NQ, Way)
