@@ -355,12 +355,19 @@ def plot_confusion_matrix(targets, preds, num_classes=3, save_path=None, class_n
         plt.close()
 
 
-def plot_tsne(features, labels, num_classes=3, save_path=None):
+def plot_tsne(features, labels, num_classes=3, save_path=None, class_names=None):
     """
     t-SNE visualization of query features - saves as PDF vector.
     
     For 200-episode test: 600 points (200 per class with 1 query each).
     Saves in two IEEE layouts: 1-column (3.5in) and 2-column (7.16in).
+    
+    Args:
+        features: (N, D) feature matrix
+        labels: (N,) class labels (0, 1, 2, ...)
+        num_classes: Number of classes
+        save_path: Path to save the figure
+        class_names: List of class names (if None, uses default)
     """
     # IEEE format: Times New Roman, 14pt font
     plt.rcParams.update({
@@ -401,8 +408,10 @@ def plot_tsne(features, labels, num_classes=3, save_path=None):
         fig, ax = plt.subplots(figsize=(width, width))  # Square figure
         sns.set_style('white')
         
-        # Class names mapping
-        class_names = ['Corona', 'NotPD', 'Surface', 'Void']
+        # Class names mapping - use provided names or default
+        default_class_names = ['Corona', 'NotPD', 'Surface', 'Void']
+        if class_names is None:
+            class_names = default_class_names
         unique_labels = sorted(set(labels))
         
         # Custom distinct colors for 4 classes
@@ -412,8 +421,9 @@ def plot_tsne(features, labels, num_classes=3, save_path=None):
         # Plot each class with CIRCLE MARKERS
         for i, label in enumerate(unique_labels):
             mask = np.array(labels) == label
-            class_name = class_names[int(label)] if int(label) < len(class_names) else str(label)
-            color = custom_colors[int(label)] if int(label) < len(custom_colors) else '#333333'
+            # Use index i to lookup class_names (works with remapped labels)
+            class_name = class_names[i] if i < len(class_names) else str(label)
+            color = custom_colors[i] if i < len(custom_colors) else '#333333'
             
             # Scatter plot with circle markers and WHITE EDGE (like reference)
             ax.scatter(

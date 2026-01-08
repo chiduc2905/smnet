@@ -82,7 +82,7 @@ def get_args():
     parser.add_argument('--min_lr', type=float, default=1e-5, help='Min LR for cosine')
     parser.add_argument('--start_lr', type=float, default=1e-5, help='Start LR for warmup')
     parser.add_argument('--warmup_iters', type=int, default=500, help='Warmup iterations')
-    parser.add_argument('--temperature', type=float, default=10.0,
+    parser.add_argument('--temperature', type=float, default=20.0,
                         help='Logit scale τ (logit = cosine * τ, recommended: 10-30)')
     parser.add_argument('--outlier_fraction', type=float, default=0.2,
                         help='Fraction of outliers to remove in 5-shot (0.0 to disable)')
@@ -436,7 +436,7 @@ def test_final(net, loader, args):
     
     cm_base = os.path.join(args.path_results, 
                            f"confusion_matrix_{args.dataset_name}_{args.model}_{samples_str.strip('_')}_{args.shot_num}shot")
-    plot_confusion_matrix(all_targets, all_preds, args.way_num, cm_base)
+    plot_confusion_matrix(all_targets, all_preds, args.way_num, cm_base, class_names=args.class_names)
     
     if os.path.exists(f"{cm_base}_2col.png"):
         wandb.log({"confusion_matrix": wandb.Image(f"{cm_base}_2col.png")})
@@ -445,7 +445,7 @@ def test_final(net, loader, args):
         features = np.vstack(all_features)
         tsne_base = os.path.join(args.path_results, 
                                  f"tsne_{args.dataset_name}_{args.model}_{samples_str.strip('_')}_{args.shot_num}shot")
-        plot_tsne(features, all_targets, args.way_num, tsne_base)
+        plot_tsne(features, all_targets, args.way_num, tsne_base, class_names=args.class_names)
         
         if os.path.exists(f"{tsne_base}_2col.png"):
             wandb.log({"tsne_plot": wandb.Image(f"{tsne_base}_2col.png")})
@@ -513,9 +513,16 @@ def main():
     # ============================================================
     # Filter to selected classes if specified
     # ============================================================
+    # Default class names from dataset
+    ALL_CLASS_NAMES = ['Corona', 'NotPD', 'Surface', 'Void']
+    
     if args.selected_classes:
         selected = [int(c.strip()) for c in args.selected_classes.split(',')]
         print(f"\n⚠️ Using only selected classes: {selected}")
+        
+        # Store actual class names for this run (for t-SNE, confusion matrix)
+        args.class_names = [ALL_CLASS_NAMES[i] for i in selected]
+        print(f"   Class names: {args.class_names}")
         
         # Update way_num to match selected classes
         args.way_num = len(selected)
@@ -541,6 +548,9 @@ def main():
         test_X, test_y = filter_classes(test_X, test_y, selected)
         
         print(f"   Train: {len(train_X)}, Val: {len(val_X)}, Test: {len(test_X)}")
+    else:
+        # Use all classes
+        args.class_names = ALL_CLASS_NAMES
     
     # Limit training samples if specified
     if args.training_samples:
