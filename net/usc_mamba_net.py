@@ -216,29 +216,21 @@ class USCMambaNet(nn.Module):
             # Encode queries: (NQ, C, H, W) -> (NQ, hidden, H', W')
             q_features = self.encode(query[b])
             
-            if self.similarity_mode == 'covariance':
-                # Encode all support classes
-                support_list = []
-                for w in range(Way):
-                    s_features = self.encode(support[b, w])  # (Shot, hidden, H', W')
-                    support_list.append(s_features)
-                
-                # Initialize CovarianceSimilarity with correct feature size if needed
-                _, _, Hf, Wf = q_features.shape
-                if self.similarity is None:
-                    self.similarity = CovarianceSimilarity(h=Hf, w=Wf, way_num=Way).to(q_features.device)
-                
-                # Get scores directly: (NQ, Way)
-                scores_per_class = self.similarity(q_features, support_list)
-            else:
-                # Original per-class loop for other similarity modes
-                scores_per_class = []
-                for w in range(Way):
-                    s_features = self.encode(support[b, w])
-                    sim = self.similarity(q_features, s_features)  # (NQ,)
-                    scores_per_class.append(sim)
-                scores_per_class = torch.stack(scores_per_class, dim=1)  # (NQ, Way)
+            # Initialize CovarianceSimilarity lazily if needed
+            if self.similarity_mode == 'covariance' and self.similarity is None:
+                self.similarity = CovarianceSimilarity().to(q_features.device)
             
+            scores_per_class = []
+            for w in range(Way):
+                # Encode support for class w: (Shot, C, H, W) -> (Shot, hidden, H', W')
+                s_features = self.encode(support[b, w])
+                
+                # Compute similarity
+                sim = self.similarity(q_features, s_features)  # (NQ,)
+                scores_per_class.append(sim)
+            
+            # Stack: (NQ, Way)
+            scores_per_class = torch.stack(scores_per_class, dim=1)
             all_scores.append(scores_per_class)
         
         return torch.cat(all_scores, dim=0)  # (B*NQ, Way)
