@@ -1,15 +1,11 @@
 """Covariance-based Metric Similarity for Few-Shot Classification.
 
-KEY PRINCIPLES:
-    - NO L2-normalize query/support (preserves magnitude for second-order stats)
-    - Covariance is feature extractor → need learnable aggregation (Conv1d)
-    - Regularize covariance: Σ + λI for stability
+CORRECT APPROACH (proven to work):
+    (A) Spatial pooling BEFORE covariance: 32×32 → 8×8
+    (B) Energy score WITHOUT learnable: score = F.mean()
+    (C) Z-score normalization across classes
 
-Formula:
-    Σ = (X - mean(X)) @ (X - mean(X))^T / (N-1) + λI   # regularized cov
-    Y = Σ @ Q                                            # (C, d)
-    F = (Q * Y).sum(dim=0)                               # (d,) efficient diag
-    logits = Conv1d(F_all)                               # learnable aggregation
+NO Conv1D, NO learnable aggregation!
 """
 import torch
 import torch.nn as nn
@@ -17,40 +13,32 @@ import torch.nn.functional as F
 
 
 class CovarianceSimilarity(nn.Module):
-    """Covariance-based similarity with learnable Conv1d aggregation.
+    """Covariance-based similarity with spatial pooling and z-score.
     
     Pipeline:
-        1. Compute regularized covariance Σ from support
-        2. For each query: F = (Q * (Σ @ Q)).sum(dim=0)  # efficient diag
-        3. Stack F for all classes: (Way * d,)
-        4. Conv1d aggregation to get logits: (Way,)
+        1. AvgPool2d(4×4) to reduce spatial: 32×32 → 8×8 (d=64)
+        2. Compute regularized covariance Σ from support
+        3. F = (Q * (Σ @ Q)).sum(dim=0) - efficient diag
+        4. score = F.mean() - energy-based, no learnable
+        5. Z-score normalize across classes
     
     Args:
-        d: Spatial dimension H*W (default: 1024 for 32x32 features)
+        pool_size: Pooling kernel size (default: 4)
         reg_lambda: Regularization for covariance (default: 0.1)
         eps: Small constant for numerical stability (default: 1e-8)
     """
     
-    def __init__(self, d: int = 1024, reg_lambda: float = 0.1, eps: float = 1e-8):
+    def __init__(self, pool_size: int = 4, reg_lambda: float = 0.1, eps: float = 1e-8):
         super().__init__()
-        self.d = d
+        self.pool = nn.AvgPool2d(kernel_size=pool_size, stride=pool_size)
         self.reg_lambda = reg_lambda
         self.eps = eps
-        
-        # Learnable aggregation: Conv1d(stride=d) to get per-class logits
-        self.agg = nn.Conv1d(
-            in_channels=1,
-            out_channels=1,
-            kernel_size=d,
-            stride=d,
-            bias=True
-        )
     
     def compute_covariance(self, support_features: torch.Tensor) -> torch.Tensor:
-        """Compute REGULARIZED covariance matrix from support features.
+        """Compute REGULARIZED covariance matrix from pooled support features.
         
         Args:
-            support_features: (Shot, C, H, W) support feature maps
+            support_features: (Shot, C, H, W) pooled support feature maps
             
         Returns:
             cov: (C, C) regularized covariance matrix
@@ -68,87 +56,80 @@ class CovarianceSimilarity(nn.Module):
         N = h * w * B
         cov = centered @ centered.t() / (N - 1 + self.eps)
         
-        # REGULARIZE: Σ + λI (CRITICAL for stability!)
+        # REGULARIZE: Σ + λI (prevents eigenvalue explosion)
         cov = cov + self.reg_lambda * torch.eye(C, device=cov.device)
         
         return cov
     
-    def compute_F(self, query_sam: torch.Tensor, cov: torch.Tensor) -> torch.Tensor:
-        """Compute F = diag(Q^T Σ Q) efficiently.
+    def compute_score(self, query_sam: torch.Tensor, cov: torch.Tensor) -> torch.Tensor:
+        """Compute energy score = mean(diag(Q^T Σ Q)).
         
         Args:
             query_sam: (C, d) query features (NO normalize!)
             cov: (C, C) covariance matrix
             
         Returns:
-            F: (d,) diagonal elements
+            score: scalar energy score
         """
-        # Efficient formula (equivalent to diag(Q^T @ Σ @ Q))
+        # Efficient formula for diag(Q^T @ Σ @ Q)
         # Y = Σ @ Q: (C, C) @ (C, d) -> (C, d)
         Y = cov @ query_sam  # (C, d)
         
         # F = (Q * Y).sum(dim=0): element-wise multiply then sum over channels
         F = (query_sam * Y).sum(dim=0)  # (d,)
         
-        return F
+        # Energy score = mean(F) - NO learnable!
+        score = F.mean()  # scalar
+        
+        return score
     
     def forward(
         self,
         query_features: torch.Tensor,
-        support_features: torch.Tensor,
-        way_num: int = None
+        support_features: torch.Tensor
     ) -> torch.Tensor:
-        """Compute F for a SINGLE class (called multiple times, once per class).
-        
-        This method is called per-class by USCMambaNet.forward().
+        """Compute covariance-based similarity score for ONE class.
         
         Args:
             query_features: (NQ, C, H, W) query feature maps
             support_features: (Shot, C, H, W) support for ONE class
             
         Returns:
-            F_all: (NQ, d) F values for each query (NOT logits yet!)
+            scores: (NQ,) similarity scores for this class
         """
         NQ, C, H, W = query_features.shape
-        d = H * W
         
-        # Update d if different from init (lazy initialization)
-        if d != self.d:
-            self.d = d
-            self.agg = nn.Conv1d(1, 1, kernel_size=d, stride=d, bias=True).to(query_features.device)
+        # Step 1: Spatial pooling to reduce variance (32×32 → 8×8)
+        q_pooled = self.pool(query_features)  # (NQ, C, H/4, W/4)
+        s_pooled = self.pool(support_features)  # (Shot, C, H/4, W/4)
         
-        # Step 1: Compute REGULARIZED covariance Σ from support
-        cov = self.compute_covariance(support_features)  # (C, C)
+        _, _, h, w = q_pooled.shape
+        d = h * w  # Should be 64 for 32→8
         
-        # Step 2: For each query, compute F (NO L2-normalize!)
-        F_list = []
+        # Step 2: Compute REGULARIZED covariance Σ from support
+        cov = self.compute_covariance(s_pooled)  # (C, C)
+        
+        # Step 3: For each query, compute energy score
+        scores = []
         for i in range(NQ):
-            query_sam = query_features[i].view(C, -1)  # (C, d) - NO normalize!
-            F_i = self.compute_F(query_sam, cov)  # (d,)
-            F_list.append(F_i)
+            query_sam = q_pooled[i].view(C, -1)  # (C, d) - NO normalize!
+            score_i = self.compute_score(query_sam, cov)  # scalar
+            scores.append(score_i)
         
-        F_all = torch.stack(F_list, dim=0)  # (NQ, d)
+        scores = torch.stack(scores)  # (NQ,)
         
-        return F_all
+        return scores
+
+
+def normalize_scores(scores: torch.Tensor) -> torch.Tensor:
+    """Z-score normalize scores across classes.
     
-    def aggregate_to_logits(self, F_per_class: list) -> torch.Tensor:
-        """Aggregate F values from all classes to logits using Conv1d.
+    Args:
+        scores: (NQ, Way) raw scores
         
-        Args:
-            F_per_class: List of (NQ, d) tensors, one per class
-            
-        Returns:
-            logits: (NQ, Way) classification logits
-        """
-        # Stack: list of (NQ, d) -> (NQ, Way, d)
-        F_stacked = torch.stack(F_per_class, dim=1)  # (NQ, Way, d)
-        NQ, Way, d = F_stacked.shape
-        
-        # Reshape for Conv1d: (NQ, 1, Way*d)
-        F_flat = F_stacked.view(NQ, 1, -1)  # (NQ, 1, Way*d)
-        
-        # Apply learnable aggregation
-        logits = self.agg(F_flat)  # (NQ, 1, Way)
-        logits = logits.squeeze(1)  # (NQ, Way)
-        
-        return logits
+    Returns:
+        normalized: (NQ, Way) z-score normalized
+    """
+    mean = scores.mean(dim=1, keepdim=True)
+    std = scores.std(dim=1, keepdim=True) + 1e-8
+    return (scores - mean) / std
