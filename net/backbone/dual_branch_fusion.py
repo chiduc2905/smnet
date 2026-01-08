@@ -235,6 +235,13 @@ class LocalAGLKABranch(nn.Module):
             nn.Sigmoid()
         )
         
+        # === Normalization + Activation after branch sums ===
+        # Multi-scale norm: LayerNorm + SiLU after DWConv5×5_d1 + d2 + d3
+        self.ms_norm = nn.LayerNorm(channels)
+        
+        # Asymmetric norm: LayerNorm + SiLU after DWConv1×7 + DWConv5×1
+        self.asym_norm = nn.LayerNorm(channels)
+        
         # Channel mixing: Residual Conv1x1 (ConvNeXt-style)
         self.channel_mix = ResidualChannelMix(channels, alpha_init=0.1)
     
@@ -257,15 +264,23 @@ class LocalAGLKABranch(nn.Module):
         x2 = self.local_stem(x1)  # DWConv3x3 + SiLU
         
         # === Multi-scale 5×5 Branch ===
-        # Combines local, mid-range, and larger context
+        # Sum → LN → SiLU
         x_ms = self.lk_conv5_d1(x2) + self.lk_conv5_d2(x2) + self.lk_conv5_d3(x2)
+        x_ms = x_ms.permute(0, 2, 3, 1)  # (B, H, W, C)
+        x_ms = self.ms_norm(x_ms)
+        x_ms = x_ms.permute(0, 3, 1, 2)  # (B, C, H, W)
+        x_ms = F.silu(x_ms)
         
         # === Asymmetric Branches ===
-        x_t = self.asym_temporal(x2)   # DWConv(1×7) - time axis
-        x_f = self.asym_frequency(x2)  # DWConv(5×1) - frequency axis
+        # Sum → LN → SiLU
+        x_asym = self.asym_temporal(x2) + self.asym_frequency(x2)
+        x_asym = x_asym.permute(0, 2, 3, 1)  # (B, H, W, C)
+        x_asym = self.asym_norm(x_asym)
+        x_asym = x_asym.permute(0, 3, 1, 2)  # (B, C, H, W)
+        x_asym = F.silu(x_asym)
         
         # === Parallel Fusion ===
-        s = x_ms + x_t + x_f
+        s = x_ms + x_asym
         
         # === Spatial Gate ===
         g = self.spatial_gap(x2).view(B, C)  # (B, C)
