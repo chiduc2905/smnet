@@ -3,9 +3,12 @@
 Implements a clean few-shot learning architecture following ADD-vs-MULTIPLY design:
 - ADD: Feature extraction (encoder, dual-branch fusion, channel mixing)
 - MUL: Feature selection (unified attention ONLY)
-- Similarity: Non-learnable position-wise cosine + mean/topk
+- Similarity: Refined prototype + class-conditional cosine
 
-This model removes all slot-based mechanisms for simpler, more interpretable matching.
+Pipeline after Stage 6 (UnifiedAttention):
+    Support Features → refine_prototype (non-learnable, remove outliers)
+                     → ClassConditionalCosine (learnable gating)
+                     → Final Scores
 """
 import torch
 import torch.nn as nn
@@ -16,8 +19,8 @@ from einops import rearrange
 from net.backbone.feature_extractor import PatchEmbed2D, PatchMerging2D
 from net.backbone.dual_branch_fusion import DualBranchFusion
 from net.backbone.unified_attention import UnifiedSpatialChannelAttention
-from net.backbone.simple_similarity import SimplePatchSimilarity, AllPairsSimilarity
-from net.backbone.covariance_similarity import CovarianceSimilarity, normalize_scores
+from net.metrics.prototype_refinement import refine_prototype
+from net.metrics.class_conditional_cosine import ClassConditionalCosine
 
 
 class ConvBlock(nn.Module):
@@ -41,22 +44,27 @@ class USCMambaNet(nn.Module):
     Uses ADD-vs-MULTIPLY design principles:
     - ADD: Feature extraction (encoder, fusion, channel mixing)
     - MUL: Feature selection (unified attention after fusion ONLY)
-    - Similarity: Non-learnable position-wise cosine + mean/topk
+    - Prototype: refine_prototype (non-learnable, outlier removal)
+    - Similarity: ClassConditionalCosine (learnable channel gating)
     
     Architecture:
-        Input → Encoder → DualBranchFusion → UnifiedAttention → SimpleSimilarity
+        Input → Encoder → DualBranchFusion → UnifiedAttention
+              → refine_prototype → ClassConditionalCosine → Scores
         
         Encoder:
-            PatchEmbed2D → PatchMerging2D (×N) → ChannelProjection
+            PatchEmbed2D → ConvBlocks → PatchMerging2D → ChannelProjection
         
         Feature Extraction (ADD-based):
-            DualBranchFusion: Local (AG-LKA + ChannelMamba) + Global (SS2D)
+            DualBranchFusion: Local (AG-LKA) + Global (VSS/Mamba)
         
         Feature Selection (MUL-based):
             UnifiedSpatialChannelAttention: ECA++ (channel) + DWConv (spatial)
         
-        Similarity (Non-learnable):
-            SimplePatchSimilarity: Position-wise cosine + mean/topk aggregation
+        Prototype Refinement (Non-learnable):
+            refine_prototype: Remove top 20% outlier samples
+        
+        Similarity (Learnable, lightweight):
+            ClassConditionalCosine: g(proto) = Linear + Sigmoid → channel weights
     
     Args:
         in_channels: Input channels (default: 3)
@@ -64,10 +72,8 @@ class USCMambaNet(nn.Module):
         hidden_dim: Hidden dim (default: 64)
         num_merging_stages: Patch merging stages (default: 2)
         d_state: Mamba state dimension (default: 4)
-        aggregation: 'mean' or 'topk' for similarity (default: 'topk')
-        topk_ratio: Ratio for top-k aggregation (default: 0.2)
-        similarity_mode: 'position' or 'allpairs' (default: 'position')
-        temperature: Temperature for similarity scaling (default: 0.2)
+        temperature: Temperature for cosine similarity (default: 1.0)
+        outlier_fraction: Fraction of outliers to remove (default: 0.2)
         device: Device to use
     """
     
@@ -78,16 +84,17 @@ class USCMambaNet(nn.Module):
         hidden_dim: int = 64,
         num_merging_stages: int = 2,
         d_state: int = 4,
-        aggregation: str = 'mean',
-        topk_ratio: float = 1.0,
-        similarity_mode: str = 'covariance',  # NEW: covariance-based similarity
         temperature: float = 1.0,
-        device: str = 'cuda'
+        outlier_fraction: float = 0.2,
+        device: str = 'cuda',
+        **kwargs  # For backward compatibility
     ):
         super().__init__()
         
         self.hidden_dim = hidden_dim
         self.device = device
+        self.temperature = temperature
+        self.outlier_fraction = outlier_fraction
         
         # ============================================================
         # STAGE 1: Patch Embedding
@@ -117,15 +124,13 @@ class USCMambaNet(nn.Module):
         final_merge_dim = base_dim * 4  # 128
         
         # ============================================================
-        # STAGE 3: Channel Projection (lightweight, with residual)
+        # STAGE 4: Channel Projection (lightweight)
         # ============================================================
-        # Use GroupNorm instead of BatchNorm (more stable for small batch)
-        # Linear projection only, no nonlinearity (reduce "heat")
         self.channel_proj_conv = nn.Conv2d(final_merge_dim, hidden_dim, kernel_size=1, bias=False)
         self.channel_proj_norm = nn.GroupNorm(num_groups=8, num_channels=hidden_dim)
         
         # ============================================================
-        # STAGE 4: Feature Extraction (ADD-based)
+        # STAGE 5: Feature Extraction (ADD-based)
         # ============================================================
         self.dual_branch = DualBranchFusion(
             channels=hidden_dim,
@@ -134,28 +139,18 @@ class USCMambaNet(nn.Module):
         )
         
         # ============================================================
-        # STAGE 5: Feature Selection (MUL-based) - ONLY MUL HERE
+        # STAGE 6: Feature Selection (MUL-based)
         # ============================================================
         self.unified_attention = UnifiedSpatialChannelAttention(hidden_dim)
         
         # ============================================================
-        # STAGE 6: Similarity (NON-learnable)
+        # STAGE 7: Class-Conditional Cosine (LEARNABLE, lightweight)
+        # Only Linear(C→C) + Sigmoid = ~4K params for hidden_dim=64
         # ============================================================
-        self.similarity_mode = similarity_mode  # Store for forward()
-        
-        if similarity_mode == 'position':
-            self.similarity = SimplePatchSimilarity(
-                aggregation=aggregation,
-                topk_ratio=topk_ratio,
-                temperature=temperature
-            )
-        elif similarity_mode == 'allpairs':
-            self.similarity = AllPairsSimilarity(temperature=temperature)
-        elif similarity_mode == 'covariance':
-            # Parameters will be set in forward based on feature size
-            self.similarity = None
-        else:
-            raise ValueError(f"Unknown similarity_mode: {similarity_mode}")
+        self.cc_cosine = ClassConditionalCosine(
+            feature_dim=hidden_dim,
+            temperature=temperature
+        )
         
         self.to(device)
     
@@ -197,7 +192,14 @@ class USCMambaNet(nn.Module):
         query: torch.Tensor,
         support: torch.Tensor
     ) -> torch.Tensor:
-        """Few-shot classification.
+        """Few-shot classification with shot-dependent prototype handling.
+        
+        Pipeline:
+            1. Encode query and support images → GAP → L2 normalize
+            2. Prototype Construction (shot-dependent):
+               - 1-shot: Use single support embedding directly (no refinement)
+               - 5-shot: Apply refine_prototype to remove outliers
+            3. ClassConditionalCosine: Compute class-conditional scores (learnable)
         
         Args:
             query: (B, NQ, C, H, W) query images
@@ -213,27 +215,56 @@ class USCMambaNet(nn.Module):
         all_scores = []
         
         for b in range(B):
-            # Encode queries: (NQ, C, H, W) -> (NQ, hidden, H', W')
-            q_features = self.encode(query[b])
+            # ============================================================
+            # Step 1: Encode query images → GAP → L2 normalize
+            # ============================================================
+            q_features = self.encode(query[b])  # (NQ, hidden, H', W')
+            q_vectors = q_features.mean(dim=[2, 3])  # GAP: (NQ, hidden)
+            q_vectors = F.normalize(q_vectors, p=2, dim=-1)  # L2 normalize
             
-            # Initialize CovarianceSimilarity lazily if needed
-            if self.similarity_mode == 'covariance' and self.similarity is None:
-                self.similarity = CovarianceSimilarity().to(q_features.device)
-            
-            # Simple per-class loop for all modes
-            scores_per_class = []
+            # ============================================================
+            # Step 2: Encode support and compute prototypes (shot-dependent)
+            # ============================================================
+            prototypes = []
             for w in range(Way):
-                s_features = self.encode(support[b, w])
-                sim = self.similarity(q_features, s_features)  # (NQ,)
-                scores_per_class.append(sim)
+                # Encode support for class w
+                s_features = self.encode(support[b, w])  # (Shot, hidden, H', W')
+                s_vectors = s_features.mean(dim=[2, 3])  # GAP: (Shot, hidden)
+                s_vectors = F.normalize(s_vectors, p=2, dim=-1)  # L2 normalize
+                
+                # === SHOT-DEPENDENT PROTOTYPE CONSTRUCTION ===
+                if Shot >= 5:
+                    # 5-shot: Apply prototype refinement to reduce outlier influence
+                    # This stabilizes class prototypes for visually similar classes
+                    # by removing the top 20% farthest support samples
+                    proto = refine_prototype(
+                        s_vectors,
+                        outlier_fraction=self.outlier_fraction
+                    )  # (hidden,)
+                else:
+                    # 1-shot: No refinement possible with single sample
+                    # Use the single support embedding directly as prototype
+                    # ClassConditionalCosine will handle discrimination
+                    proto = s_vectors.squeeze(0)  # (hidden,)
+                    proto = F.normalize(proto, p=2, dim=-1)  # Ensure L2 normalized
+                
+                prototypes.append(proto)
             
-            scores_per_class = torch.stack(scores_per_class, dim=1)  # (NQ, Way)
+            # Stack prototypes: (Way, hidden)
+            prototypes = torch.stack(prototypes, dim=0)
             
-            # Z-score normalize for covariance mode
-            if self.similarity_mode == 'covariance':
-                scores_per_class = normalize_scores(scores_per_class)
+            # ============================================================
+            # Step 3: Class-Conditional Cosine Similarity (learnable)
+            # ============================================================
+            # For BOTH 1-shot and 5-shot:
+            # - g(proto_c) = Linear + Sigmoid → class-specific channel weights
+            # - score_c = cosine(q ⊙ g(proto_c), proto_c)
+            # This is the ONLY learnable component in Stage 7
+            # Improves decision robustness by learning which channels matter
+            # for each class, increasing effective cosine margin
+            scores = self.cc_cosine(q_vectors, prototypes)  # (NQ, Way)
             
-            all_scores.append(scores_per_class)
+            all_scores.append(scores)
         
         return torch.cat(all_scores, dim=0)  # (B*NQ, Way)
     
