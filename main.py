@@ -245,7 +245,7 @@ def train_loop(net, train_loader, val_X, val_y, args):
                                 args.way_num, args.shot_num, args.query_num, args.seed + epoch)
         val_loader = DataLoader(val_ds, batch_size=1, shuffle=False)
         
-        val_acc, val_loss = evaluate(net, val_loader, args, criterion_main)
+        val_acc, val_loss = evaluate(net, val_loader, args)
         avg_loss = total_loss / len(train_loader)
         
         # Track history
@@ -291,8 +291,8 @@ def train_loop(net, train_loader, val_X, val_y, args):
     return best_acc, history
 
 
-def evaluate(net, loader, args, criterion_main=None):
-    """Compute accuracy and optionally loss on loader."""
+def evaluate(net, loader, args):
+    """Compute accuracy and loss on loader."""
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     net.eval()
     correct, total = 0, 0
@@ -316,10 +316,10 @@ def evaluate(net, loader, args, criterion_main=None):
             correct += (preds == targets).sum().item()
             total += targets.size(0)
             
-            if criterion_main is not None:
-                loss = criterion_main(scores, targets)
-                total_loss += loss.item()
-                num_batches += 1
+            # Use F.cross_entropy directly
+            loss = F.cross_entropy(scores, targets)
+            total_loss += loss.item()
+            num_batches += 1
     
     acc = correct / total if total > 0 else 0
     avg_loss = total_loss / num_batches if num_batches > 0 else None
