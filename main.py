@@ -98,8 +98,8 @@ def get_args():
     parser.add_argument('--seed', type=int, default=42)
     
     # Loss
-    parser.add_argument('--lambda_center', type=float, default=0.0, 
-                        help='Weight for Center Loss (default: 0.0, disabled)')
+    parser.add_argument('--lambda_center', type=float, default=0.1, 
+                        help='Weight for Center Loss (default: 0.1)')
     parser.add_argument('--margin', type=float, default=0.2,
                         help='CosFace margin for correct class (default: 0.2). Set to 0 to disable.')
     

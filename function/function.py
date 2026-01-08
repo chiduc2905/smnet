@@ -405,18 +405,21 @@ def plot_tsne(features, labels, num_classes=3, save_path=None):
         class_names = ['Corona', 'NotPD', 'Surface', 'Void']
         unique_labels = sorted(set(labels))
         
-        # Use tab10 colormap for distinct colors like reference
-        colors = plt.cm.tab10(np.linspace(0, 1, len(unique_labels)))
+        # Custom distinct colors for 4 classes
+        # Corona (orange), Void (purple) - distinct from each other
+        custom_colors = ['#ff7f0e', '#2ca02c', '#1f77b4', '#9467bd']  # orange, green, blue, purple
         
-        # Plot each class
+        # Plot each class with CIRCLE MARKERS
         for i, label in enumerate(unique_labels):
             mask = np.array(labels) == label
             class_name = class_names[int(label)] if int(label) < len(class_names) else str(label)
+            color = custom_colors[int(label)] if int(label) < len(custom_colors) else '#333333'
             
-            # Scatter plot with WHITE EDGE (like reference)
+            # Scatter plot with circle markers and WHITE EDGE (like reference)
             ax.scatter(
                 embedded[mask, 0], embedded[mask, 1],
-                c=[colors[i]], s=40, alpha=0.85,
+                c=[color], s=40, alpha=0.85,
+                marker='o',  # Circle marker
                 edgecolors='white', linewidths=0.5,
                 label=class_name
             )
