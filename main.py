@@ -48,7 +48,7 @@ def get_args():
     parser = argparse.ArgumentParser(description='SMNet (Slot Mamba Network) Few-shot Learning')
     
     # Paths
-    parser.add_argument('--dataset_path', type=str, default='/mnt/disk2/nhatnc/res/scalogram_fewshot/proposed_model/smnet/scalogram_v2_split')
+    parser.add_argument('--dataset_path', type=str, default='/mnt/disk2/nhatnc/res/scalogram_fewshot/proposed_model/smnet/scalogram_official')
     parser.add_argument('--path_weights', type=str, default='checkpoints/')
     parser.add_argument('--path_results', type=str, default='results/')
     parser.add_argument('--weights', type=str, default=None, help='Checkpoint for testing')
@@ -62,7 +62,7 @@ def get_args():
                         help='Hidden dimension for feature extractor')
     
     # Few-shot settings
-    parser.add_argument('--way_num', type=int, default=4)
+    parser.add_argument('--way_num', type=int, default=3)
     parser.add_argument('--shot_num', type=int, default=1)
     parser.add_argument('--query_num', type=int, default=5, help='Queries per class (same for train/val/test)')
     parser.add_argument('--selected_classes', type=str, default=None,
@@ -514,7 +514,7 @@ def main():
     # Filter to selected classes if specified
     # ============================================================
     # Default class names from dataset
-    ALL_CLASS_NAMES = ['Corona', 'NotPD', 'Surface', 'Void']
+    ALL_CLASS_NAMES = ['Corona', 'NotPD', 'Surface']
     
     if args.selected_classes:
         selected = [int(c.strip()) for c in args.selected_classes.split(',')]

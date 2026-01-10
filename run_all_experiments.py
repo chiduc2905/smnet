@@ -8,7 +8,7 @@ def get_args():
     parser = argparse.ArgumentParser(description='Run all USCMambaNet experiments')
     parser.add_argument('--project', type=str, default='uscmamba', help='WandB project name')
     parser.add_argument('--dataset_path', type=str, 
-                        default='/mnt/disk2/nhatnc/res/scalogram_fewshot/proposed_model/smnet/scalogram_v2_split',
+                        default='/mnt/disk2/nhatnc/res/scalogram_fewshot/proposed_model/smnet/scalogram_official',
                         help='Path to dataset')
     parser.add_argument('--dataset_name', type=str, default='minh', help='Dataset name for logging')
     return parser.parse_args()
@@ -37,7 +37,7 @@ def run_experiment(model, shot, samples, dataset_path, dataset_name, project):
         sys.executable, 'main.py',
         '--model', model,
         '--shot_num', str(shot),
-        '--way_num', '4',
+        '--way_num', '3',
         '--query_num', str(QUERY_NUM),
         '--image_size', '128',
         '--mode', 'train',

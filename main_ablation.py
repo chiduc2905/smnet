@@ -36,7 +36,7 @@ def get_args():
     parser = argparse.ArgumentParser(description='SMNet Ablation Training')
     
     # Paths
-    parser.add_argument('--dataset_path', type=str, default='/mnt/disk2/nhatnc/res/scalogram_fewshot/proposed_model/smnet/scalogram_v2_split')
+    parser.add_argument('--dataset_path', type=str, default='/mnt/disk2/nhatnc/res/scalogram_fewshot/proposed_model/smnet/scalogram_official')
     parser.add_argument('--path_weights', type=str, default='checkpoints/')
     parser.add_argument('--path_results', type=str, default='results/')
     parser.add_argument('--dataset_name', type=str, default='minh')
@@ -53,7 +53,7 @@ def get_args():
     parser.add_argument('--lambda_init', type=float, default=2.0)
     
     # Few-shot settings
-    parser.add_argument('--way_num', type=int, default=4)
+    parser.add_argument('--way_num', type=int, default=3)
     parser.add_argument('--shot_num', type=int, default=1)
     parser.add_argument('--query_num', type=int, default=5)
     parser.add_argument('--image_size', type=int, default=64)

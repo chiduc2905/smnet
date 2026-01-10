@@ -75,9 +75,9 @@ def get_args():
                         help='Disable VSS Block (keep Conv+LKA only)')
     
     # Basic config
-    parser.add_argument('--dataset_path', type=str, default='/mnt/disk2/nhatnc/res/scalogram_fewshot/proposed_model/smnet/scalogram_v2_split')
+    parser.add_argument('--dataset_path', type=str, default='/mnt/disk2/nhatnc/res/scalogram_fewshot/proposed_model/smnet/scalogram_official')
     parser.add_argument('--shot_num', type=int, default=5)
-    parser.add_argument('--way_num', type=int, default=4)
+    parser.add_argument('--way_num', type=int, default=3)
     parser.add_argument('--query_num', type=int, default=1)
     parser.add_argument('--image_size', type=int, default=64)
     parser.add_argument('--seed', type=int, default=42)
