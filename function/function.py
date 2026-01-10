@@ -433,12 +433,9 @@ def plot_tsne(features, labels, num_classes=3, save_path=None, class_names=None)
                 edgecolors='white', linewidths=0.5,
                 label=class_name
             )
-        # Auto-scale axes based on data (like reference)
-        x_min, x_max = embedded[:, 0].min(), embedded[:, 0].max()
-        y_min, y_max = embedded[:, 1].min(), embedded[:, 1].max()
-        padding = max(x_max - x_min, y_max - y_min) * 0.1
-        ax.set_xlim(x_min - padding, x_max + padding)
-        ax.set_ylim(y_min - padding, y_max + padding)
+        # Fixed axes from -50 to 50 (like reference image)
+        ax.set_xlim(-50, 50)
+        ax.set_ylim(-50, 50)
         ax.set_xlabel('')
         ax.set_ylabel('')
         ax.tick_params(axis='both', which='major', labelsize=10)
