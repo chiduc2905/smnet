@@ -572,9 +572,9 @@ def main():
         print(f"Using {args.training_samples} training samples ({per_class}/class)")
     
     # Create data loaders
-    # Training: 1 query per class (reduces variance, faster training)
+    # Training: use same query_num as val/test for reproducibility across projects
     train_ds = FewshotDataset(train_X, train_y, args.episode_num_train,
-                              args.way_num, args.shot_num, 1, args.seed)
+                              args.way_num, args.shot_num, args.query_num, args.seed)
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
     
     test_ds = FewshotDataset(test_X, test_y, args.episode_num_test,

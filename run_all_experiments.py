@@ -24,7 +24,7 @@ SHOTS = [1, 5]
 SAMPLES_LIST = [30, 60, 150, None]
 
 # Query samples (same for train/val/test)
-QUERY_NUM = 1  # Changed from 5 to 1
+QUERY_NUM = 5  # Synced with pd_fewshot for identical episodes
 
 # Model variants
 MODELS = ['uscmamba']
