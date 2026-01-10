@@ -40,7 +40,7 @@ class AblationConfig:
     query_num: int = 5  # Same for train/val/test
     
     # Training
-    training_samples_list: List[int] = field(default_factory=lambda: [80, 200, 600, 6000])
+    training_samples_list: List[int] = field(default_factory=lambda: [30, 60, 150])
     num_epochs: int = 100
     lr: float = 1e-3  # Base LR
     step_size: int = 10  # StepLR step size

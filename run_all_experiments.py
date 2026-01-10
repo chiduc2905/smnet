@@ -17,8 +17,11 @@ def get_args():
 # Configuration
 SHOTS = [1, 5]
 
-# Training samples: [min, small, medium, large]
-SAMPLES_LIST = [80, 200, 600, 6000]
+# Training samples: [min_5shot, small, medium, all]
+# Dataset: corona=367, NotPD=210 (min), surface=392 → 3 classes
+# Min for 5-shot: 5 (shot) + 5 (query) = 10/class → 30 total
+# Max balanced: 210/class → 630 total, or None for all available
+SAMPLES_LIST = [30, 60, 150, None]
 
 # Query samples (same for train/val/test)
 QUERY_NUM = 1  # Changed from 5 to 1
