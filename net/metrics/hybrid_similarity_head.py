@@ -76,6 +76,22 @@ class RelationDeltaHead(nn.Module):
             nn.ReLU(inplace=True),
             nn.Linear(self.hidden_dim, 1)  # Output: scalar delta
         )
+        
+        # CRITICAL: Initialize so delta starts near 0
+        # This prevents delta from disrupting cosine at training start
+        self._init_weights()
+    
+    def _init_weights(self):
+        """Initialize MLP so delta output starts near 0.
+        
+        Last layer: weight → small, bias → 0
+        This ensures cosine is dominant at training start.
+        """
+        # Get the last Linear layer
+        last_linear = self.mlp[-1]
+        nn.init.normal_(last_linear.weight, mean=0.0, std=0.01)
+        if last_linear.bias is not None:
+            nn.init.zeros_(last_linear.bias)
     
     def forward(self, z_query: torch.Tensor, proto: torch.Tensor) -> torch.Tensor:
         """Compute relation delta for query-prototype pair.
@@ -128,9 +144,10 @@ class HybridSimilarityHead(nn.Module):
     
     Args:
         in_dim: Input feature dimension from backbone
-        proj_dim: Projection dimension (default: in_dim // 2)
+        proj_dim: Projection dimension (default: in_dim // 2, ignored if use_projection=False)
         temperature: Cosine scaling factor tau (default: 16.0)
         delta_lambda: Weight for relation delta (default: 0.25)
+        use_projection: Whether to use embedding projection (default: True)
     """
     
     def __init__(
@@ -138,19 +155,29 @@ class HybridSimilarityHead(nn.Module):
         in_dim: int,
         proj_dim: Optional[int] = None,
         temperature: float = 16.0,
-        delta_lambda: float = 0.25
+        delta_lambda: float = 0.25,
+        use_projection: bool = True
     ):
         super().__init__()
         
-        self.proj_dim = proj_dim if proj_dim is not None else in_dim // 2
+        self.in_dim = in_dim
+        self.use_projection = use_projection
         self.temperature = temperature
         self.delta_lambda = delta_lambda
         
-        # 2️⃣ Embedding Projection (Meta-Baseline style)
-        self.embedding_proj = EmbeddingProjection(in_dim, self.proj_dim)
+        if use_projection:
+            self.proj_dim = proj_dim if proj_dim is not None else in_dim // 2
+            # 2️⃣ Embedding Projection (Meta-Baseline style)
+            self.embedding_proj = EmbeddingProjection(in_dim, self.proj_dim)
+            embed_dim = self.proj_dim
+        else:
+            # No projection, use full dimension
+            self.proj_dim = in_dim
+            self.embedding_proj = None
+            embed_dim = in_dim
         
         # 5️⃣ Relation Delta Head
-        self.relation_delta = RelationDeltaHead(self.proj_dim)
+        self.relation_delta = RelationDeltaHead(embed_dim)
     
     def project(self, feat: torch.Tensor) -> torch.Tensor:
         """Project features through embedding projection.
@@ -161,7 +188,11 @@ class HybridSimilarityHead(nn.Module):
         Returns:
             z: (B, proj_dim) projected, L2-normalized embeddings
         """
-        return self.embedding_proj(feat)
+        if self.use_projection and self.embedding_proj is not None:
+            return self.embedding_proj(feat)
+        else:
+            # No projection, just L2 normalize
+            return F.normalize(feat, p=2, dim=-1)
     
     def compute_prototypes(self, z_support: torch.Tensor, way_num: int, shot_num: int) -> torch.Tensor:
         """Compute class prototypes from support embeddings.

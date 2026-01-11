@@ -87,6 +87,7 @@ class USCMambaNet(nn.Module):
         d_state: int = 4,
         temperature: float = 16.0,
         delta_lambda: float = 0.25,
+        use_projection: bool = True,
         device: str = 'cuda',
         **kwargs  # For backward compatibility
     ):
@@ -96,6 +97,7 @@ class USCMambaNet(nn.Module):
         self.device = device
         self.temperature = temperature
         self.delta_lambda = delta_lambda
+        self.use_projection = use_projection
         
         # ============================================================
         # STAGE 1: Patch Embedding
@@ -151,7 +153,8 @@ class USCMambaNet(nn.Module):
             in_dim=hidden_dim,
             proj_dim=hidden_dim // 2,
             temperature=temperature,
-            delta_lambda=delta_lambda
+            delta_lambda=delta_lambda,
+            use_projection=use_projection
         )
         
         self.to(device)

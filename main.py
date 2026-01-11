@@ -86,6 +86,8 @@ def get_args():
                         help='Cosine similarity temperature τ (recommended: 16-20)')
     parser.add_argument('--delta_lambda', type=float, default=0.25,
                         help='Weight for relation delta correction (recommended: 0.2-0.3)')
+    parser.add_argument('--no_projection', action='store_true',
+                        help='Disable embedding projection in similarity head (for debugging)')
     parser.add_argument('--grad_clip', type=float, default=1.0,
                         help='Gradient clipping max norm')
     parser.add_argument('--eta_min', type=float, default=1e-5,
@@ -122,6 +124,7 @@ def get_model(args):
         hidden_dim=args.hidden_dim,
         temperature=args.temperature,
         delta_lambda=args.delta_lambda,
+        use_projection=not args.no_projection,
         device=str(device)
     )
     
@@ -348,7 +351,9 @@ def test_final(net, loader, args):
     print('='*60)
     
     net.eval()
-    all_preds, all_targets, all_features = [], [], []
+    all_preds, all_targets = [], []
+    all_features = []       # Backbone features (encode + GAP)
+    all_features_proj = []  # Projected features (similarity head)
     episode_accuracies = []
     episode_times = []
     
@@ -375,13 +380,17 @@ def test_final(net, loader, args):
             all_preds.extend(preds.cpu().numpy())
             all_targets.extend(targets.cpu().numpy())
             
-            # Extract features for t-SNE using encode (returns B,C,H,W)
-            # Use L2 normalized features for tight clusters (matches model's internal processing)
+            # Extract features for t-SNE - collect BOTH backbone and projected
             q_flat = query.view(-1, C, H, W)
             features = net.encode(q_flat)  # (NQ, hidden_dim, H', W')
-            feat = features.mean(dim=(2, 3))  # Global avg pool: (NQ, hidden_dim)
-            feat = F.normalize(feat, p=2, dim=-1)  # L2 normalize for tight t-SNE clusters
-            all_features.append(feat.cpu().numpy())
+            feat_backbone = features.mean(dim=(2, 3))  # GAP: (NQ, hidden_dim)
+            feat_backbone = F.normalize(feat_backbone, p=2, dim=-1)  # L2 normalize
+            
+            # Projected features (what model uses for classification)
+            feat_projected = net.similarity_head.project(feat_backbone)  # (NQ, proj_dim)
+            
+            all_features.append(feat_backbone.cpu().numpy())
+            all_features_proj.append(feat_projected.cpu().numpy())
     
     # Metrics
     all_preds = np.array(all_preds)
@@ -443,14 +452,26 @@ def test_final(net, loader, args):
     if os.path.exists(f"{cm_base}_2col.png"):
         wandb.log({"confusion_matrix": wandb.Image(f"{cm_base}_2col.png")})
     
+    # t-SNE Plots (2 versions: backbone and projected)
     if all_features:
-        features = np.vstack(all_features)
-        tsne_base = os.path.join(args.path_results, 
-                                 f"tsne_{args.dataset_name}_{args.model}_{samples_str.strip('_')}_{args.shot_num}shot")
-        plot_tsne(features, all_targets, args.way_num, tsne_base, class_names=args.class_names)
+        # 1. Backbone features t-SNE
+        features_backbone = np.vstack(all_features)
+        tsne_backbone = os.path.join(args.path_results, 
+                                     f"tsne_backbone_{args.dataset_name}_{args.model}_{samples_str.strip('_')}_{args.shot_num}shot")
+        plot_tsne(features_backbone, all_targets, args.way_num, tsne_backbone, class_names=args.class_names)
         
-        if os.path.exists(f"{tsne_base}_2col.png"):
-            wandb.log({"tsne_plot": wandb.Image(f"{tsne_base}_2col.png")})
+        if os.path.exists(f"{tsne_backbone}_2col.png"):
+            wandb.log({"tsne_backbone": wandb.Image(f"{tsne_backbone}_2col.png")})
+    
+    if all_features_proj:
+        # 2. Projected features t-SNE (what model uses for decision)
+        features_proj = np.vstack(all_features_proj)
+        tsne_proj = os.path.join(args.path_results, 
+                                 f"tsne_projected_{args.dataset_name}_{args.model}_{samples_str.strip('_')}_{args.shot_num}shot")
+        plot_tsne(features_proj, all_targets, args.way_num, tsne_proj, class_names=args.class_names)
+        
+        if os.path.exists(f"{tsne_proj}_2col.png"):
+            wandb.log({"tsne_projected": wandb.Image(f"{tsne_proj}_2col.png")})
     
     # Save results to file
     txt_path = os.path.join(args.path_results, 
