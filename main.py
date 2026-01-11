@@ -67,7 +67,7 @@ def get_args():
     parser.add_argument('--query_num', type=int, default=5, help='Queries per class (same for train/val/test)')
     parser.add_argument('--selected_classes', type=str, default=None,
                         help='Comma-separated class indices to use (e.g. "0,1" for first 2 classes). If None, use all classes.')
-    parser.add_argument('--image_size', type=int, default=128,
+    parser.add_argument('--image_size', type=int, default=64,
                         help='Input image size (default: 128)')
     
     # Training
