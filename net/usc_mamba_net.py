@@ -3,12 +3,12 @@
 Implements a clean few-shot learning architecture following ADD-vs-MULTIPLY design:
 - ADD: Feature extraction (encoder, dual-branch fusion, channel mixing)
 - MUL: Feature selection (unified attention ONLY)
-- Similarity: Refined prototype + class-conditional cosine
+- Similarity: Simple GAP → L2 Norm → Cosine Similarity × temperature
 
 Pipeline after Stage 6 (UnifiedAttention):
-    Support Features → refine_prototype (non-learnable, remove outliers)
-                     → ClassConditionalCosine (learnable gating)
-                     → Final Scores
+    Features → GAP → L2 Normalize → Cosine Similarity × temperature → Final Scores
+    
+Note: ClassConditionalCosine and refine_prototype temporarily removed for ablation.
 """
 import torch
 import torch.nn as nn
@@ -19,8 +19,9 @@ from einops import rearrange
 from net.backbone.feature_extractor import PatchEmbed2D, PatchMerging2D
 from net.backbone.dual_branch_fusion import DualBranchFusion
 from net.backbone.unified_attention import UnifiedSpatialChannelAttention
-from net.metrics.prototype_refinement import refine_prototype
-from net.metrics.class_conditional_cosine import ClassConditionalCosine
+# Temporarily disabled for ablation:
+# from net.metrics.prototype_refinement import refine_prototype
+# from net.metrics.class_conditional_cosine import ClassConditionalCosine
 
 
 class ConvBlock(nn.Module):
@@ -44,12 +45,13 @@ class USCMambaNet(nn.Module):
     Uses ADD-vs-MULTIPLY design principles:
     - ADD: Feature extraction (encoder, fusion, channel mixing)
     - MUL: Feature selection (unified attention after fusion ONLY)
-    - Prototype: refine_prototype (non-learnable, outlier removal)
-    - Similarity: ClassConditionalCosine (learnable channel gating)
+    - Similarity: Simple GAP → L2 Norm → Cosine × temperature
+    
+    Note: ClassConditionalCosine and refine_prototype temporarily disabled for ablation.
     
     Architecture:
         Input → Encoder → DualBranchFusion → UnifiedAttention
-              → refine_prototype → ClassConditionalCosine → Scores
+              → GAP → L2 Norm → Cosine Similarity × temperature → Scores
         
         Encoder:
             PatchEmbed2D → ConvBlocks → PatchMerging2D → ChannelProjection
@@ -60,11 +62,8 @@ class USCMambaNet(nn.Module):
         Feature Selection (MUL-based):
             UnifiedSpatialChannelAttention: ECA++ (channel) + DWConv (spatial)
         
-        Prototype Refinement (Non-learnable):
-            refine_prototype: Remove top 20% outlier samples
-        
-        Similarity (Learnable, lightweight):
-            ClassConditionalCosine: g(proto) = Linear + Sigmoid → channel weights
+        Similarity (Non-learnable, simple):
+            Cosine Similarity: scaled by temperature
     
     Args:
         in_channels: Input channels (default: 3)
@@ -73,7 +72,6 @@ class USCMambaNet(nn.Module):
         num_merging_stages: Patch merging stages (default: 2)
         d_state: Mamba state dimension (default: 4)
         temperature: Temperature for cosine similarity (default: 1.0)
-        outlier_fraction: Fraction of outliers to remove (default: 0.2)
         device: Device to use
     """
     
@@ -85,16 +83,14 @@ class USCMambaNet(nn.Module):
         num_merging_stages: int = 2,
         d_state: int = 4,
         temperature: float = 1.0,
-        outlier_fraction: float = 0.2,
         device: str = 'cuda',
-        **kwargs  # For backward compatibility
+        **kwargs  # For backward compatibility (outlier_fraction ignored)
     ):
         super().__init__()
         
         self.hidden_dim = hidden_dim
         self.device = device
         self.temperature = temperature
-        self.outlier_fraction = outlier_fraction
         
         # ============================================================
         # STAGE 1: Patch Embedding
@@ -144,13 +140,11 @@ class USCMambaNet(nn.Module):
         self.unified_attention = UnifiedSpatialChannelAttention(hidden_dim)
         
         # ============================================================
-        # STAGE 7: Class-Conditional Cosine (LEARNABLE, lightweight)
-        # Only Linear(C→C) + Sigmoid = ~4K params for hidden_dim=64
+        # STAGE 7: Simple Cosine Similarity (NON-learnable)
+        # Simple: GAP → L2 Norm → Cosine × temperature
+        # ClassConditionalCosine temporarily disabled for ablation
         # ============================================================
-        self.cc_cosine = ClassConditionalCosine(
-            feature_dim=hidden_dim,
-            temperature=temperature
-        )
+        # No learnable components needed for simple cosine
         
         self.to(device)
     
@@ -192,14 +186,12 @@ class USCMambaNet(nn.Module):
         query: torch.Tensor,
         support: torch.Tensor
     ) -> torch.Tensor:
-        """Few-shot classification with shot-dependent prototype handling.
+        """Few-shot classification with simple cosine similarity.
         
-        Pipeline:
+        Pipeline (simplified for ablation):
             1. Encode query and support images → GAP → L2 normalize
-            2. Prototype Construction (shot-dependent):
-               - 1-shot: Use single support embedding directly (no refinement)
-               - 5-shot: Apply refine_prototype to remove outliers
-            3. ClassConditionalCosine: Compute class-conditional scores (learnable)
+            2. Prototype: Simple mean of support embeddings (no refinement)
+            3. Cosine Similarity × temperature (no class-conditional gating)
         
         Args:
             query: (B, NQ, C, H, W) query images
@@ -223,7 +215,7 @@ class USCMambaNet(nn.Module):
             q_vectors = F.normalize(q_vectors, p=2, dim=-1)  # L2 normalize
             
             # ============================================================
-            # Step 2: Encode support and compute prototypes (shot-dependent)
+            # Step 2: Encode support and compute prototypes (simple mean)
             # ============================================================
             prototypes = []
             for w in range(Way):
@@ -232,21 +224,10 @@ class USCMambaNet(nn.Module):
                 s_vectors = s_features.mean(dim=[2, 3])  # GAP: (Shot, hidden)
                 s_vectors = F.normalize(s_vectors, p=2, dim=-1)  # L2 normalize
                 
-                # === SHOT-DEPENDENT PROTOTYPE CONSTRUCTION ===
-                if Shot >= 5:
-                    # 5-shot: Apply prototype refinement to reduce outlier influence
-                    # This stabilizes class prototypes for visually similar classes
-                    # by removing the top 20% farthest support samples
-                    proto = refine_prototype(
-                        s_vectors,
-                        outlier_fraction=self.outlier_fraction
-                    )  # (hidden,)
-                else:
-                    # 1-shot: No refinement possible with single sample
-                    # Use the single support embedding directly as prototype
-                    # ClassConditionalCosine will handle discrimination
-                    proto = s_vectors.squeeze(0)  # (hidden,)
-                    proto = F.normalize(proto, p=2, dim=-1)  # Ensure L2 normalized
+                # === SIMPLE MEAN PROTOTYPE (no refinement) ===
+                # Just average all support samples for this class
+                proto = s_vectors.mean(dim=0)  # (hidden,)
+                proto = F.normalize(proto, p=2, dim=-1)  # Re-normalize after mean
                 
                 prototypes.append(proto)
             
@@ -254,15 +235,11 @@ class USCMambaNet(nn.Module):
             prototypes = torch.stack(prototypes, dim=0)
             
             # ============================================================
-            # Step 3: Class-Conditional Cosine Similarity (learnable)
+            # Step 3: Simple Cosine Similarity × temperature
             # ============================================================
-            # For BOTH 1-shot and 5-shot:
-            # - g(proto_c) = Linear + Sigmoid → class-specific channel weights
-            # - score_c = cosine(q ⊙ g(proto_c), proto_c)
-            # This is the ONLY learnable component in Stage 7
-            # Improves decision robustness by learning which channels matter
-            # for each class, increasing effective cosine margin
-            scores = self.cc_cosine(q_vectors, prototypes)  # (NQ, Way)
+            # cosine(q, proto) = q @ proto.T (since both L2 normalized)
+            # scores = (NQ, Way)
+            scores = torch.mm(q_vectors, prototypes.t()) * self.temperature
             
             all_scores.append(scores)
         

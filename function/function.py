@@ -397,71 +397,65 @@ def plot_tsne(features, labels, num_classes=3, save_path=None, class_names=None)
     tsne = TSNE(n_components=2, perplexity=perp, random_state=42, init='pca')
     embedded = tsne.fit_transform(features_pca)
     
-    # Rescale to fit within [-50, 50]
-    max_val = np.abs(embedded).max()
-    if max_val > 0:
-        embedded = embedded / max_val * 45  # Scale to max 45 to leave margin
-    
     # Save in 2-column IEEE layout only
     width = 7.16  # 2-column: 7.16 inches
     layout_name = '2col'
-    if True:  # Keep indentation structure
-        fig, ax = plt.subplots(figsize=(width, width))  # Square figure
-        sns.set_style('white')
+    
+    fig, ax = plt.subplots(figsize=(width, width))  # Square figure
+    sns.set_style('white')
+    
+    # Class names mapping - use provided names or default
+    default_class_names = ['Corona', 'NotPD', 'Surface', 'Void']
+    if class_names is None:
+        class_names = default_class_names
+    unique_labels = sorted(set(labels))
+    
+    # Custom distinct colors for 4 classes
+    # Corona (orange), Void (purple) - distinct from each other
+    custom_colors = ['#ff7f0e', '#2ca02c', '#1f77b4', '#9467bd']  # orange, green, blue, purple
+    
+    # Plot each class with CIRCLE MARKERS
+    for i, label in enumerate(unique_labels):
+        mask = np.array(labels) == label
+        # Use index i to lookup class_names (works with remapped labels)
+        class_name = class_names[i] if i < len(class_names) else str(label)
+        color = custom_colors[i] if i < len(custom_colors) else '#333333'
         
-        # Class names mapping - use provided names or default
-        default_class_names = ['Corona', 'NotPD', 'Surface', 'Void']
-        if class_names is None:
-            class_names = default_class_names
-        unique_labels = sorted(set(labels))
-        
-        # Custom distinct colors for 4 classes
-        # Corona (orange), Void (purple) - distinct from each other
-        custom_colors = ['#ff7f0e', '#2ca02c', '#1f77b4', '#9467bd']  # orange, green, blue, purple
-        
-        # Plot each class with CIRCLE MARKERS
-        for i, label in enumerate(unique_labels):
-            mask = np.array(labels) == label
-            # Use index i to lookup class_names (works with remapped labels)
-            class_name = class_names[i] if i < len(class_names) else str(label)
-            color = custom_colors[i] if i < len(custom_colors) else '#333333'
-            
-            # Scatter plot with circle markers and WHITE EDGE (like reference)
-            ax.scatter(
-                embedded[mask, 0], embedded[mask, 1],
-                c=[color], s=40, alpha=0.85,
-                marker='o',  # Circle marker
-                edgecolors='white', linewidths=0.5,
-                label=class_name
-            )
-        # Fixed axes from -50 to 50 (like reference image)
-        ax.set_xlim(-50, 50)
-        ax.set_ylim(-50, 50)
-        ax.set_xlabel('')
-        ax.set_ylabel('')
-        ax.tick_params(axis='both', which='major', labelsize=10)
-        ax.set_aspect('equal')
-        
-        # Light grid like reference
-        ax.grid(True, alpha=0.3, linestyle='-', linewidth=0.5)
-        ax.set_axisbelow(True)
-        
-        # Legend outside
-        ax.legend(loc='upper right', fontsize=9)
-        
-        plt.tight_layout()
-        if save_path:
-            # Remove extension if present
-            base_path = save_path.rsplit('.', 1)[0] if '.' in save_path else save_path
-            # Save as PDF (vector for publication)
-            pdf_path = f"{base_path}_{layout_name}.pdf"
-            plt.savefig(pdf_path, format='pdf', bbox_inches='tight', facecolor='white')
-            print(f'Saved: {pdf_path}')
-            # Save as PNG (for WandB logging)
-            png_path = f"{base_path}_{layout_name}.png"
-            plt.savefig(png_path, format='png', dpi=300, bbox_inches='tight', facecolor='white')
-            print(f'Saved: {png_path}')
-        plt.close()
+        # Scatter plot with circle markers and WHITE EDGE (like reference)
+        ax.scatter(
+            embedded[mask, 0], embedded[mask, 1],
+            c=[color], s=40, alpha=0.85,
+            marker='o',  # Circle marker
+            edgecolors='white', linewidths=0.5,
+            label=class_name
+        )
+    
+    # Auto-scale axes (no fixed limits)
+    ax.set_xlabel('')
+    ax.set_ylabel('')
+    ax.tick_params(axis='both', which='major', labelsize=10)
+    ax.set_aspect('equal')
+    
+    # Light grid like reference
+    ax.grid(True, alpha=0.3, linestyle='-', linewidth=0.5)
+    ax.set_axisbelow(True)
+    
+    # Legend outside
+    ax.legend(loc='upper right', fontsize=9)
+    
+    plt.tight_layout()
+    if save_path:
+        # Remove extension if present
+        base_path = save_path.rsplit('.', 1)[0] if '.' in save_path else save_path
+        # Save as PDF (vector for publication)
+        pdf_path = f"{base_path}_{layout_name}.pdf"
+        plt.savefig(pdf_path, format='pdf', bbox_inches='tight', facecolor='white')
+        print(f'Saved: {pdf_path}')
+        # Save as PNG (for WandB logging)
+        png_path = f"{base_path}_{layout_name}.png"
+        plt.savefig(png_path, format='png', dpi=300, bbox_inches='tight', facecolor='white')
+        print(f'Saved: {png_path}')
+    plt.close()
 
 
 def plot_tsne_comparison(original_features, encoded_features, labels, num_classes=3, save_path=None):
