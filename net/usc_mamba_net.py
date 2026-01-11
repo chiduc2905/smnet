@@ -3,12 +3,16 @@
 Implements a clean few-shot learning architecture following ADD-vs-MULTIPLY design:
 - ADD: Feature extraction (encoder, dual-branch fusion, channel mixing)
 - MUL: Feature selection (unified attention ONLY)
-- Similarity: Simple GAP → L2 Norm → Cosine Similarity × temperature
+- Similarity: Hybrid Head (Cosine + Relation Delta Correction)
 
 Pipeline after Stage 6 (UnifiedAttention):
-    Features → GAP → L2 Normalize → Cosine Similarity × temperature → Final Scores
+    Features → GAP → HybridSimilarityHead → Final Scores
     
-Note: ClassConditionalCosine and refine_prototype temporarily removed for ablation.
+HybridSimilarityHead:
+    - Embedding Projection (Linear → LayerNorm → L2 Normalize)
+    - Cosine Similarity (main score)
+    - Relation Delta (lightweight correction)
+    - Final: score = tau * cosine + lambda * delta
 """
 import torch
 import torch.nn as nn
@@ -19,9 +23,7 @@ from einops import rearrange
 from net.backbone.feature_extractor import PatchEmbed2D, PatchMerging2D
 from net.backbone.dual_branch_fusion import DualBranchFusion
 from net.backbone.unified_attention import UnifiedSpatialChannelAttention
-# Temporarily disabled for ablation:
-# from net.metrics.prototype_refinement import refine_prototype
-# from net.metrics.class_conditional_cosine import ClassConditionalCosine
+from net.metrics.hybrid_similarity_head import HybridSimilarityHead
 
 
 class ConvBlock(nn.Module):
@@ -39,19 +41,19 @@ class ConvBlock(nn.Module):
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.proj(x) + self.act(self.bn(self.conv(x)))
+
+
 class USCMambaNet(nn.Module):
     """Unified Spatial-Channel Mamba Network (U-SCMambaNet).
     
     Uses ADD-vs-MULTIPLY design principles:
     - ADD: Feature extraction (encoder, fusion, channel mixing)
     - MUL: Feature selection (unified attention after fusion ONLY)
-    - Similarity: Simple GAP → L2 Norm → Cosine × temperature
-    
-    Note: ClassConditionalCosine and refine_prototype temporarily disabled for ablation.
+    - Similarity: Hybrid Head (Cosine + Relation Delta Correction)
     
     Architecture:
         Input → Encoder → DualBranchFusion → UnifiedAttention
-              → GAP → L2 Norm → Cosine Similarity × temperature → Scores
+              → GAP → HybridSimilarityHead → Scores
         
         Encoder:
             PatchEmbed2D → ConvBlocks → PatchMerging2D → ChannelProjection
@@ -62,8 +64,8 @@ class USCMambaNet(nn.Module):
         Feature Selection (MUL-based):
             UnifiedSpatialChannelAttention: ECA++ (channel) + DWConv (spatial)
         
-        Similarity (Non-learnable, simple):
-            Cosine Similarity: scaled by temperature
+        Similarity (Hybrid):
+            HybridSimilarityHead: Cosine (main) + Relation Delta (correction)
     
     Args:
         in_channels: Input channels (default: 3)
@@ -71,7 +73,8 @@ class USCMambaNet(nn.Module):
         hidden_dim: Hidden dim (default: 64)
         num_merging_stages: Patch merging stages (default: 2)
         d_state: Mamba state dimension (default: 4)
-        temperature: Temperature for cosine similarity (default: 1.0)
+        temperature: Temperature for cosine similarity (default: 16.0)
+        delta_lambda: Weight for relation delta correction (default: 0.25)
         device: Device to use
     """
     
@@ -82,15 +85,17 @@ class USCMambaNet(nn.Module):
         hidden_dim: int = 64,
         num_merging_stages: int = 2,
         d_state: int = 4,
-        temperature: float = 1.0,
+        temperature: float = 16.0,
+        delta_lambda: float = 0.25,
         device: str = 'cuda',
-        **kwargs  # For backward compatibility (outlier_fraction ignored)
+        **kwargs  # For backward compatibility
     ):
         super().__init__()
         
         self.hidden_dim = hidden_dim
         self.device = device
         self.temperature = temperature
+        self.delta_lambda = delta_lambda
         
         # ============================================================
         # STAGE 1: Patch Embedding
@@ -140,11 +145,14 @@ class USCMambaNet(nn.Module):
         self.unified_attention = UnifiedSpatialChannelAttention(hidden_dim)
         
         # ============================================================
-        # STAGE 7: Simple Cosine Similarity (NON-learnable)
-        # Simple: GAP → L2 Norm → Cosine × temperature
-        # ClassConditionalCosine temporarily disabled for ablation
+        # STAGE 7: Hybrid Similarity Head (Cosine + Relation Delta)
         # ============================================================
-        # No learnable components needed for simple cosine
+        self.similarity_head = HybridSimilarityHead(
+            in_dim=hidden_dim,
+            proj_dim=hidden_dim // 2,
+            temperature=temperature,
+            delta_lambda=delta_lambda
+        )
         
         self.to(device)
     
@@ -186,12 +194,11 @@ class USCMambaNet(nn.Module):
         query: torch.Tensor,
         support: torch.Tensor
     ) -> torch.Tensor:
-        """Few-shot classification with simple cosine similarity.
+        """Few-shot classification with Hybrid Similarity Head.
         
-        Pipeline (simplified for ablation):
-            1. Encode query and support images → GAP → L2 normalize
-            2. Prototype: Simple mean of support embeddings (no refinement)
-            3. Cosine Similarity × temperature (no class-conditional gating)
+        Pipeline:
+            1. Encode query and support images → GAP
+            2. HybridSimilarityHead: Project → Prototype → Cosine + Delta
         
         Args:
             query: (B, NQ, C, H, W) query images
@@ -208,38 +215,27 @@ class USCMambaNet(nn.Module):
         
         for b in range(B):
             # ============================================================
-            # Step 1: Encode query images → GAP → L2 normalize
+            # Step 1: Encode and GAP
             # ============================================================
-            q_features = self.encode(query[b])  # (NQ, hidden, H', W')
-            q_vectors = q_features.mean(dim=[2, 3])  # GAP: (NQ, hidden)
-            q_vectors = F.normalize(q_vectors, p=2, dim=-1)  # L2 normalize
+            # Query: (NQ, hidden, H', W') → (NQ, hidden)
+            q_features = self.encode(query[b])
+            q_vectors = q_features.mean(dim=[2, 3])  # GAP
+            
+            # Support: (Way*Shot, hidden, H', W') → (Way*Shot, hidden)
+            s_flat = support[b].view(Way * Shot, C, H, W)
+            s_features = self.encode(s_flat)
+            s_vectors = s_features.mean(dim=[2, 3])  # GAP
             
             # ============================================================
-            # Step 2: Encode support and compute prototypes (simple mean)
+            # Step 2: Hybrid Similarity Head
             # ============================================================
-            prototypes = []
-            for w in range(Way):
-                # Encode support for class w
-                s_features = self.encode(support[b, w])  # (Shot, hidden, H', W')
-                s_vectors = s_features.mean(dim=[2, 3])  # GAP: (Shot, hidden)
-                s_vectors = F.normalize(s_vectors, p=2, dim=-1)  # L2 normalize
-                
-                # === SIMPLE MEAN PROTOTYPE (no refinement) ===
-                # Just average all support samples for this class
-                proto = s_vectors.mean(dim=0)  # (hidden,)
-                proto = F.normalize(proto, p=2, dim=-1)  # Re-normalize after mean
-                
-                prototypes.append(proto)
-            
-            # Stack prototypes: (Way, hidden)
-            prototypes = torch.stack(prototypes, dim=0)
-            
-            # ============================================================
-            # Step 3: Simple Cosine Similarity × temperature
-            # ============================================================
-            # cosine(q, proto) = q @ proto.T (since both L2 normalized)
-            # scores = (NQ, Way)
-            scores = torch.mm(q_vectors, prototypes.t()) * self.temperature
+            # Project, compute prototypes, and get hybrid scores
+            scores = self.similarity_head.forward_with_support(
+                feat_query=q_vectors,      # (NQ, hidden)
+                feat_support=s_vectors,    # (Way*Shot, hidden)  
+                way_num=Way,
+                shot_num=Shot
+            )  # (NQ, Way)
             
             all_scores.append(scores)
         

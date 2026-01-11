@@ -82,10 +82,10 @@ def get_args():
     parser.add_argument('--min_lr', type=float, default=1e-5, help='Min LR for cosine')
     parser.add_argument('--start_lr', type=float, default=1e-5, help='Start LR for warmup')
     parser.add_argument('--warmup_iters', type=int, default=500, help='Warmup iterations')
-    parser.add_argument('--temperature', type=float, default=20.0,
-                        help='Logit scale τ (logit = cosine * τ, recommended: 10-30)')
-    parser.add_argument('--outlier_fraction', type=float, default=0.2,
-                        help='Fraction of outliers to remove in 5-shot (0.0 to disable)')
+    parser.add_argument('--temperature', type=float, default=16.0,
+                        help='Cosine similarity temperature τ (recommended: 16-20)')
+    parser.add_argument('--delta_lambda', type=float, default=0.25,
+                        help='Weight for relation delta correction (recommended: 0.2-0.3)')
     parser.add_argument('--grad_clip', type=float, default=1.0,
                         help='Gradient clipping max norm')
     parser.add_argument('--eta_min', type=float, default=1e-5,
@@ -121,7 +121,7 @@ def get_model(args):
         in_channels=3,  # RGB input
         hidden_dim=args.hidden_dim,
         temperature=args.temperature,
-        outlier_fraction=args.outlier_fraction,
+        delta_lambda=args.delta_lambda,
         device=str(device)
     )
     
@@ -376,9 +376,11 @@ def test_final(net, loader, args):
             all_targets.extend(targets.cpu().numpy())
             
             # Extract features for t-SNE using encode (returns B,C,H,W)
+            # Use L2 normalized features for tight clusters (matches model's internal processing)
             q_flat = query.view(-1, C, H, W)
             features = net.encode(q_flat)  # (NQ, hidden_dim, H', W')
             feat = features.mean(dim=(2, 3))  # Global avg pool: (NQ, hidden_dim)
+            feat = F.normalize(feat, p=2, dim=-1)  # L2 normalize for tight t-SNE clusters
             all_features.append(feat.cpu().numpy())
     
     # Metrics
