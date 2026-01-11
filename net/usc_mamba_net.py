@@ -3,16 +3,16 @@
 Implements a clean few-shot learning architecture following ADD-vs-MULTIPLY design:
 - ADD: Feature extraction (encoder, dual-branch fusion, channel mixing)
 - MUL: Feature selection (unified attention ONLY)
-- Similarity: Hybrid Head (Cosine + Relation Delta Correction)
+- Prototype Cross-Attention: Query refinement before GAP
+- Similarity: Cosine Similarity with Bottleneck
 
 Pipeline after Stage 6 (UnifiedAttention):
-    Features → GAP → HybridSimilarityHead → Final Scores
+    Features → PrototypeCrossAttention → GAP → CosineSimilarityHead → Final Scores
     
-HybridSimilarityHead:
-    - Embedding Projection (Linear → LayerNorm → L2 Normalize)
-    - Cosine Similarity (main score)
-    - Relation Delta (lightweight correction)
-    - Final: score = tau * cosine + lambda * delta
+CosineSimilarityHead:
+    - Bottleneck (Linear → LayerNorm)
+    - L2 Normalize
+    - Cosine Similarity × temperature
 """
 import torch
 import torch.nn as nn
@@ -23,7 +23,8 @@ from einops import rearrange
 from net.backbone.feature_extractor import PatchEmbed2D, PatchMerging2D
 from net.backbone.dual_branch_fusion import DualBranchFusion
 from net.backbone.unified_attention import UnifiedSpatialChannelAttention
-from net.metrics.hybrid_similarity_head import HybridSimilarityHead
+from net.metrics.hybrid_similarity_head import CosineSimilarityHead
+from net.metrics.prototype_cross_attention import PrototypeCrossAttention
 
 
 class ConvBlock(nn.Module):
@@ -49,11 +50,12 @@ class USCMambaNet(nn.Module):
     Uses ADD-vs-MULTIPLY design principles:
     - ADD: Feature extraction (encoder, fusion, channel mixing)
     - MUL: Feature selection (unified attention after fusion ONLY)
-    - Similarity: Hybrid Head (Cosine + Relation Delta Correction)
+    - Cross-Attention: Prototype-guided query refinement
+    - Similarity: Cosine with Bottleneck
     
     Architecture:
         Input → Encoder → DualBranchFusion → UnifiedAttention
-              → GAP → HybridSimilarityHead → Scores
+              → PrototypeCrossAttention → GAP → CosineSimilarityHead → Scores
         
         Encoder:
             PatchEmbed2D → ConvBlocks → PatchMerging2D → ChannelProjection
@@ -64,8 +66,11 @@ class USCMambaNet(nn.Module):
         Feature Selection (MUL-based):
             UnifiedSpatialChannelAttention: ECA++ (channel) + DWConv (spatial)
         
-        Similarity (Hybrid):
-            HybridSimilarityHead: Cosine (main) + Relation Delta (correction)
+        Query Refinement:
+            PrototypeCrossAttention: Q' = softmax(Q·Pᵀ/√C)·P, Q = Q + α*Q'
+        
+        Similarity:
+            CosineSimilarityHead: Bottleneck → L2 → Cosine
     
     Args:
         in_channels: Input channels (default: 3)
@@ -74,7 +79,8 @@ class USCMambaNet(nn.Module):
         num_merging_stages: Patch merging stages (default: 2)
         d_state: Mamba state dimension (default: 4)
         temperature: Temperature for cosine similarity (default: 16.0)
-        delta_lambda: Weight for relation delta correction (default: 0.25)
+        cross_attn_alpha: Residual weight for cross-attention (default: 0.1)
+        use_projection: Whether to use bottleneck projection (default: True)
         device: Device to use
     """
     
@@ -86,17 +92,16 @@ class USCMambaNet(nn.Module):
         num_merging_stages: int = 2,
         d_state: int = 4,
         temperature: float = 16.0,
-        delta_lambda: float = 0.25,
+        cross_attn_alpha: float = 0.1,
         use_projection: bool = True,
         device: str = 'cuda',
-        **kwargs  # For backward compatibility
+        **kwargs  # For backward compatibility (delta_lambda, etc.)
     ):
         super().__init__()
         
         self.hidden_dim = hidden_dim
         self.device = device
         self.temperature = temperature
-        self.delta_lambda = delta_lambda
         self.use_projection = use_projection
         
         # ============================================================
@@ -147,13 +152,20 @@ class USCMambaNet(nn.Module):
         self.unified_attention = UnifiedSpatialChannelAttention(hidden_dim)
         
         # ============================================================
-        # STAGE 7: Hybrid Similarity Head (Cosine + Relation Delta)
+        # STAGE 7: Prototype Cross-Attention (Query Refinement)
         # ============================================================
-        self.similarity_head = HybridSimilarityHead(
+        self.proto_cross_attn = PrototypeCrossAttention(
+            channels=hidden_dim,
+            alpha=cross_attn_alpha
+        )
+        
+        # ============================================================
+        # STAGE 8: Cosine Similarity Head (Bottleneck → L2 → Cosine)
+        # ============================================================
+        self.similarity_head = CosineSimilarityHead(
             in_dim=hidden_dim,
             proj_dim=hidden_dim // 2,
             temperature=temperature,
-            delta_lambda=delta_lambda,
             use_projection=use_projection
         )
         
@@ -197,11 +209,13 @@ class USCMambaNet(nn.Module):
         query: torch.Tensor,
         support: torch.Tensor
     ) -> torch.Tensor:
-        """Few-shot classification with Hybrid Similarity Head.
+        """Few-shot classification with Prototype Cross-Attention and Cosine Similarity.
         
         Pipeline:
-            1. Encode query and support images → GAP
-            2. HybridSimilarityHead: Project → Prototype → Cosine + Delta
+            1. Encode query and support images
+            2. PrototypeCrossAttention: Refine query with prototype maps
+            3. GAP on refined queries
+            4. CosineSimilarityHead: Bottleneck → L2 → Cosine
         
         Args:
             query: (B, NQ, C, H, W) query images
@@ -218,28 +232,60 @@ class USCMambaNet(nn.Module):
         
         for b in range(B):
             # ============================================================
-            # Step 1: Encode and GAP
+            # Step 1: Encode features (keep spatial)
             # ============================================================
-            # Query: (NQ, hidden, H', W') → (NQ, hidden)
-            q_features = self.encode(query[b])
-            q_vectors = q_features.mean(dim=[2, 3])  # GAP
+            # Query: (NQ, C, H, W) → (NQ, hidden, H', W')
+            q_features = self.encode(query[b])  # (NQ, hidden, H', W')
             
-            # Support: (Way*Shot, hidden, H', W') → (Way*Shot, hidden)
+            # Support: (Way*Shot, C, H, W) → (Way*Shot, hidden, H', W')
             s_flat = support[b].view(Way * Shot, C, H, W)
-            s_features = self.encode(s_flat)
-            s_vectors = s_features.mean(dim=[2, 3])  # GAP
+            s_features = self.encode(s_flat)  # (Way*Shot, hidden, H', W')
             
             # ============================================================
-            # Step 2: Hybrid Similarity Head
+            # Step 2: Prototype Cross-Attention (refine query)
             # ============================================================
-            # Project, compute prototypes, and get hybrid scores
-            scores = self.similarity_head.forward_with_support(
-                feat_query=q_vectors,      # (NQ, hidden)
-                feat_support=s_vectors,    # (Way*Shot, hidden)  
+            # Q' = softmax(Q·Pᵀ/√C)·P, Q = Q + α*Q'
+            # refined_query: (NQ, Way, hidden, H', W')
+            refined_query, proto_maps = self.proto_cross_attn(
+                query_feat=q_features,
+                support_feat=s_features,
                 way_num=Way,
                 shot_num=Shot
-            )  # (NQ, Way)
+            )
             
+            # ============================================================
+            # Step 3: GAP on refined queries
+            # ============================================================
+            # (NQ, Way, hidden, H', W') → (NQ, Way, hidden)
+            q_vectors = refined_query.mean(dim=[3, 4])  # GAP
+            
+            # Support vectors from prototype maps: (Way, hidden, H', W') → (Way, hidden)
+            s_vectors = proto_maps.mean(dim=[2, 3])  # GAP
+            
+            # ============================================================
+            # Step 4: Cosine Similarity for each query-prototype pair
+            # ============================================================
+            # Project and compute scores
+            # q_vectors: (NQ, Way, hidden), s_vectors: (Way, hidden)
+            
+            # Project query vectors for each class
+            scores_list = []
+            for c in range(Way):
+                q_c = q_vectors[:, c, :]  # (NQ, hidden) - query refined for class c
+                s_c = s_vectors[c:c+1, :]  # (1, hidden) - prototype for class c
+                
+                # Project both
+                z_q = self.similarity_head.project(q_c)  # (NQ, D)
+                z_s = self.similarity_head.project(s_c)  # (1, D)
+                z_s = F.normalize(z_s, p=2, dim=-1)  # Re-normalize
+                
+                # Cosine similarity
+                score_c = torch.mm(z_q, z_s.t())  # (NQ, 1)
+                score_c = self.similarity_head.temperature * score_c
+                scores_list.append(score_c)
+            
+            # Stack: (NQ, Way)
+            scores = torch.cat(scores_list, dim=1)
             all_scores.append(scores)
         
         return torch.cat(all_scores, dim=0)  # (B*NQ, Way)

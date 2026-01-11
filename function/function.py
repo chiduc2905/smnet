@@ -392,7 +392,7 @@ def plot_tsne(features, labels, num_classes=3, save_path=None, class_names=None)
     features_pca = pca.fit_transform(features_scaled)
     print(f"  PCA reduced to {n_components} dimensions")
     
-    perp = min(30, max(5, n // 3))
+    perp = 5  # Fixed perplexity for tighter class clusters
     
     tsne = TSNE(n_components=2, perplexity=perp, random_state=42, init='pca')
     embedded = tsne.fit_transform(features_pca)
@@ -479,7 +479,7 @@ def plot_tsne_comparison(original_features, encoded_features, labels, num_classe
     n_comp_orig = min(50, n-1, original_features.shape[1])
     pca_orig = PCA(n_components=n_comp_orig, random_state=42)
     orig_pca = pca_orig.fit_transform(orig_scaled)
-    perp = min(30, max(5, n // 3))
+    perp = 5  # Fixed perplexity for tighter class clusters
     tsne_orig = TSNE(n_components=2, perplexity=perp, random_state=42, init='pca')
     orig_embedded = tsne_orig.fit_transform(orig_pca)
     
