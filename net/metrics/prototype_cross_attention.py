@@ -81,8 +81,9 @@ class PrototypeCrossAttention(nn.Module):
         mu = support.mean(dim=0)  # (C, H, W)
         
         # Step 2: Compute cosine similarity of each sample to mean
-        S_flat = support.view(Shot, -1)  # (Shot, C*H*W)
-        mu_flat = mu.view(1, -1)          # (1, C*H*W)
+        # Use contiguous() because support may be a slice (non-contiguous)
+        S_flat = support.contiguous().view(Shot, -1)  # (Shot, C*H*W)
+        mu_flat = mu.contiguous().view(1, -1)          # (1, C*H*W)
         
         sim = F.cosine_similarity(S_flat, mu_flat, dim=1)  # (Shot,)
         
