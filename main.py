@@ -31,7 +31,7 @@ from dataset import load_dataset
 from dataloader.dataloader import FewshotDataset
 from function.function import (
     ContrastiveLoss, MarginContrastiveLoss, CenterLoss, seed_func,
-    plot_confusion_matrix, plot_tsne, plot_training_curves
+    plot_confusion_matrix, plot_tsne, plot_umap, plot_training_curves
 )
 from function.debug_utils import print_grad_norm, print_logit_stats, set_debug_mode, is_debug_mode
 
@@ -67,7 +67,7 @@ def get_args():
     parser.add_argument('--query_num', type=int, default=5, help='Queries per class (same for train/val/test)')
     parser.add_argument('--selected_classes', type=str, default=None,
                         help='Comma-separated class indices to use (e.g. "0,1" for first 2 classes). If None, use all classes.')
-    parser.add_argument('--image_size', type=int, default=64,
+    parser.add_argument('--image_size', type=int, default=128,
                         help='Input image size (default: 128)')
     
     # Training
@@ -460,8 +460,8 @@ def test_final(net, loader, args):
                                      f"tsne_backbone_{args.dataset_name}_{args.model}_{samples_str.strip('_')}_{args.shot_num}shot")
         plot_tsne(features_backbone, all_targets, args.way_num, tsne_backbone, class_names=args.class_names)
         
-        if os.path.exists(f"{tsne_backbone}_2col.png"):
-            wandb.log({"tsne_backbone": wandb.Image(f"{tsne_backbone}_2col.png")})
+        if os.path.exists(f"{tsne_backbone}_tsne.png"):
+            wandb.log({"tsne_backbone": wandb.Image(f"{tsne_backbone}_tsne.png")})
     
     if all_features_proj:
         # 2. Projected features t-SNE (what model uses for decision)
@@ -470,8 +470,18 @@ def test_final(net, loader, args):
                                  f"tsne_projected_{args.dataset_name}_{args.model}_{samples_str.strip('_')}_{args.shot_num}shot")
         plot_tsne(features_proj, all_targets, args.way_num, tsne_proj, class_names=args.class_names)
         
-        if os.path.exists(f"{tsne_proj}_2col.png"):
-            wandb.log({"tsne_projected": wandb.Image(f"{tsne_proj}_2col.png")})
+        if os.path.exists(f"{tsne_proj}_tsne.png"):
+            wandb.log({"tsne_projected": wandb.Image(f"{tsne_proj}_tsne.png")})
+    
+    # UMAP Plot (using projected features - standard in papers)
+    if all_features_proj:
+        features_proj = np.vstack(all_features_proj)
+        umap_path = os.path.join(args.path_results, 
+                                 f"umap_{args.dataset_name}_{args.model}_{samples_str.strip('_')}_{args.shot_num}shot")
+        plot_umap(features_proj, all_targets, args.way_num, umap_path, class_names=args.class_names)
+        
+        if os.path.exists(f"{umap_path}_umap.png"):
+            wandb.log({"umap": wandb.Image(f"{umap_path}_umap.png")})
     
     # Save results to file
     txt_path = os.path.join(args.path_results, 

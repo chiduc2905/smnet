@@ -404,14 +404,14 @@ def plot_tsne(features, labels, num_classes=3, save_path=None, class_names=None,
     print(f"  PCA reduced to {n_components} dimensions")
     
     # 3. t-SNE with optimized parameters
-    perp = min(30, max(5, n // 3))  # Dynamic perplexity
+    perp = 20  # Fixed perplexity (optimal for 45-150 points in few-shot)
     tsne = TSNE(
         n_components=2, 
         perplexity=perp, 
         random_state=42, 
         init='pca',
         learning_rate='auto',
-        n_iter=1000
+        max_iter=1000
     )
     embedded = tsne.fit_transform(features_pca)
     
