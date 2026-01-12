@@ -97,10 +97,17 @@ def get_args():
     parser.add_argument('--seed', type=int, default=42)
     
     # Loss
-    parser.add_argument('--lambda_center', type=float, default=0.1, 
-                        help='Weight for Center Loss (default: 0.1)')
-    parser.add_argument('--margin', type=float, default=0.2,
-                        help='CosFace margin for correct class (default: 0.2). Set to 0 to disable.')
+    parser.add_argument('--lambda_center', type=float, default=0.01, 
+                        help='Weight for Center Loss (default: 0.01)')
+    parser.add_argument('--margin_type', type=str, default='none',
+                        choices=['none', 'cosface', 'arcface'],
+                        help='Margin loss type: none (CE only), cosface, or arcface')
+    parser.add_argument('--margin', type=float, default=0.3,
+                        help='Margin value for CosFace/ArcFace (default: 0.3)')
+    parser.add_argument('--margin_scale', type=float, default=20.0,
+                        help='Scale factor s for margin loss (default: 20.0)')
+    parser.add_argument('--lambda_margin', type=float, default=0.1,
+                        help='Weight for margin loss regularizer (recommended: 0.05-0.2)')
     
     # Debug
     parser.add_argument('--debug', action='store_true',
@@ -139,23 +146,46 @@ def train_loop(net, train_loader, val_X, val_y, args):
     """Train with CosineAnnealingLR + Warmup (per-iteration LR adjustment)."""
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
-    # Loss: Simple CrossEntropy (no margin, no contrastive, no cosine)
-    print("Using F.cross_entropy (standard CE loss)")
+    # Import margin losses
+    from net.metrics.arcface_cosface import ArcFace, CosFace
     
     # Calculate feature dimension dynamically
-    # USCMambaNet.encode() returns (B, hidden_dim, H', W')
     with torch.no_grad():
         dummy_input = torch.randn(1, 3, args.image_size, args.image_size).to(device)
         dummy_features = net.encode(dummy_input)  # (1, C, H', W')
         feat_dim = dummy_features.shape[1]  # hidden_dim (channel dim)
-        
+    
+    # Initialize margin loss based on type
+    if args.margin_type == 'arcface':
+        margin_loss = ArcFace(
+            in_features=feat_dim,
+            out_features=args.way_num,
+            scale=args.margin_scale,
+            margin=args.margin
+        ).to(device)
+        print(f"Using ArcFace: scale={args.margin_scale}, margin={args.margin}")
+    elif args.margin_type == 'cosface':
+        margin_loss = CosFace(
+            in_features=feat_dim,
+            out_features=args.way_num,
+            scale=args.margin_scale,
+            margin=args.margin
+        ).to(device)
+        print(f"Using CosFace: scale={args.margin_scale}, margin={args.margin}")
+    else:
+        margin_loss = None
+        print("Using standard F.cross_entropy (no margin)")
+    
+    # Center Loss (optional)
     criterion_center = CenterLoss(num_classes=args.way_num, feat_dim=feat_dim, device=device)
     
     # Optimizer with weight decay
-    optimizer = optim.AdamW([
-        {'params': net.parameters()},
-        {'params': criterion_center.parameters()}
-    ], lr=args.lr, weight_decay=args.weight_decay)
+    params_to_optimize = [{'params': net.parameters()}]
+    if margin_loss is not None:
+        params_to_optimize.append({'params': margin_loss.parameters()})
+    params_to_optimize.append({'params': criterion_center.parameters()})
+    
+    optimizer = optim.AdamW(params_to_optimize, lr=args.lr, weight_decay=args.weight_decay)
     
     # CosineAnnealingLR Scheduler (sync with main branch)
     # LR decays from lr to eta_min over T_max epochs following cosine curve
@@ -192,7 +222,7 @@ def train_loop(net, train_loader, val_X, val_y, args):
             query = query.to(device)
             targets = q_labels.view(-1).to(device)
             
-            # Forward
+            # Forward (episode-based matching)
             scores = net(query, support)
             
             # Track training accuracy on same episodes (not re-sampled)
@@ -201,19 +231,33 @@ def train_loop(net, train_loader, val_X, val_y, args):
                 train_correct += (preds == targets).sum().item()
                 train_total += targets.size(0)
             
-            # Main Loss: Standard CrossEntropy (no margin, no contrastive)
+            # ============================================================
+            # Loss Computation
+            # ============================================================
+            
+            # Extract embedding features for auxiliary losses
+            q_flat = query.view(-1, C, H, W)
+            feat_maps = net.encode(q_flat)  # (NQ, C, H', W')
+            features = feat_maps.mean(dim=(2, 3))  # Global avg pool: (NQ, C)
+            features = F.normalize(features, p=2, dim=1)  # L2 normalize
+            
+            # Main Loss: Episode-based CrossEntropy on prototype matching
             loss_main = F.cross_entropy(scores, targets)
             
-            # Center Loss (optional)
-            if args.lambda_center > 0:
-                q_flat = query.view(-1, C, H, W)
-                feat_maps = net.encode(q_flat)  # (NQ, C, H', W')
-                features = feat_maps.mean(dim=(2, 3))  # Global avg pool: (NQ, C)
-                features = F.normalize(features, p=2, dim=1)
-                loss_center = criterion_center(features, targets)
-                loss = loss_main + args.lambda_center * loss_center
+            # Auxiliary Margin Loss (ArcFace/CosFace) as REGULARIZER
+            # IMPORTANT: This is NOT the decision head, just embedding regularization
+            # λ should be small (0.05-0.2) to not overpower episodic metric learning
+            if margin_loss is not None:
+                margin_logits = margin_loss(features, targets)
+                loss_margin = F.cross_entropy(margin_logits, targets)
+                loss = loss_main + args.lambda_margin * loss_margin
             else:
                 loss = loss_main
+            
+            # Center Loss (optional, now with reduced weight 0.01)
+            if args.lambda_center > 0:
+                loss_center = criterion_center(features, targets)
+                loss = loss + args.lambda_center * loss_center
             
             loss.backward()
             

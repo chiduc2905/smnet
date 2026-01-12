@@ -42,7 +42,7 @@ def run_experiment(model, shot, samples, dataset_path, dataset_name, project):
         '--shot_num', str(shot),
         '--way_num', '3',
         '--query_num', str(QUERY_NUM),
-        '--image_size', '64',
+        '--image_size', '128',
         '--mode', 'train',
         '--project', project,
         '--dataset_path', dataset_path,
@@ -51,7 +51,7 @@ def run_experiment(model, shot, samples, dataset_path, dataset_name, project):
         '--lr', '1e-3',
         '--eta_min', '1e-5',
         '--weight_decay', '1e-4',
-        '--margin', '0',  # No margin needed
+        '--margin_type', 'none',  # Disable ArcFace/CosFace for now
         '--episode_num_train', '100',
         '--episode_num_val', '150',
         '--episode_num_test', '150',
