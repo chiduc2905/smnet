@@ -356,7 +356,7 @@ def plot_confusion_matrix(targets, preds, num_classes=3, save_path=None, class_n
         plt.close()
 
 
-def plot_tsne(features, labels, num_classes=3, save_path=None, class_names=None, title=None):
+def plot_tsne(features, labels, num_classes=3, save_path=None, class_names=None):
     """
     t-SNE visualization - Q1 Publication Quality (IEEE/Nature style).
     
@@ -431,22 +431,22 @@ def plot_tsne(features, labels, num_classes=3, save_path=None, class_names=None,
         class_names = default_class_names
     unique_labels = sorted(set(labels))
     
-    # Nature/Science color palette (colorblind-friendly)
-    # Based on: https://www.nature.com/documents/NRJs-style-guide.pdf
-    nature_colors = [
-        '#E64B35',  # Vermillion (red-orange)
-        '#4DBBD5',  # Sky Blue
-        '#00A087',  # Teal/Green
-        '#8E55AA',  # Purple
-        '#F39B7F',  # Coral
-        '#3C5488',  # Blue
+    # Q1 Publication color palette (NPG/Lancet style - highly distinct)
+    # Based on ggsci::scale_color_npg() - Nature Publishing Group
+    publication_colors = [
+        '#E64B35',  # NPG Red (Corona)
+        '#3C5488',  # NPG Navy Blue (NotPD)
+        '#00A087',  # NPG Teal/Green (Surface)
+        '#F39B7F',  # NPG Coral
+        '#8491B4',  # NPG Lavender Gray
+        '#91D1C2',  # NPG Mint
     ]
     
     # Plot each class
     for i, label in enumerate(unique_labels):
         mask = np.array(labels) == label
         class_name = class_names[i] if i < len(class_names) else str(label)
-        color = nature_colors[i % len(nature_colors)]
+        color = publication_colors[i % len(publication_colors)]
         
         ax.scatter(
             embedded[mask, 0], embedded[mask, 1],
@@ -465,8 +465,8 @@ def plot_tsne(features, labels, num_classes=3, save_path=None, class_names=None,
     # ================================================================
     ax.set_xlim(-60, 60)
     ax.set_ylim(-60, 60)
-    ax.set_xlabel('t-SNE Dimension 1', fontsize=12, fontweight='bold')
-    ax.set_ylabel('t-SNE Dimension 2', fontsize=12, fontweight='bold')
+    ax.set_xlabel('')
+    ax.set_ylabel('')
     ax.tick_params(axis='both', which='major', labelsize=10)
     ax.set_aspect('equal')
     
@@ -491,9 +491,7 @@ def plot_tsne(features, labels, num_classes=3, save_path=None, class_names=None,
     )
     legend.get_frame().set_linewidth(0.8)
     
-    # Optional title
-    if title:
-        ax.set_title(title, fontsize=13, fontweight='bold', pad=10)
+
     
     plt.tight_layout()
     
@@ -524,7 +522,7 @@ def plot_tsne(features, labels, num_classes=3, save_path=None, class_names=None,
     plt.close()
 
 
-def plot_umap(features, labels, num_classes=3, save_path=None, class_names=None, title=None):
+def plot_umap(features, labels, num_classes=3, save_path=None, class_names=None):
     """
     UMAP visualization - Q1 Publication Quality (IEEE/Nature style).
     
@@ -606,21 +604,22 @@ def plot_umap(features, labels, num_classes=3, save_path=None, class_names=None,
         class_names = default_class_names
     unique_labels = sorted(set(labels))
     
-    # Nature/Science color palette (colorblind-friendly)
-    nature_colors = [
-        '#E64B35',  # Vermillion (red-orange)
-        '#4DBBD5',  # Sky Blue
-        '#00A087',  # Teal/Green
-        '#8E55AA',  # Purple
-        '#F39B7F',  # Coral
-        '#3C5488',  # Blue
+    # Q1 Publication color palette (NPG/Lancet style - highly distinct)
+    # Based on ggsci::scale_color_npg() - Nature Publishing Group
+    publication_colors = [
+        '#E64B35',  # NPG Red (Corona)
+        '#3C5488',  # NPG Navy Blue (NotPD)
+        '#00A087',  # NPG Teal/Green (Surface)
+        '#F39B7F',  # NPG Coral
+        '#8491B4',  # NPG Lavender Gray
+        '#91D1C2',  # NPG Mint
     ]
     
     # Plot each class
     for i, label in enumerate(unique_labels):
         mask = np.array(labels) == label
         class_name = class_names[i] if i < len(class_names) else str(label)
-        color = nature_colors[i % len(nature_colors)]
+        color = publication_colors[i % len(publication_colors)]
         
         ax.scatter(
             embedded[mask, 0], embedded[mask, 1],
@@ -639,8 +638,8 @@ def plot_umap(features, labels, num_classes=3, save_path=None, class_names=None,
     # ================================================================
     ax.set_xlim(-60, 60)
     ax.set_ylim(-60, 60)
-    ax.set_xlabel('UMAP Dimension 1', fontsize=12, fontweight='bold')
-    ax.set_ylabel('UMAP Dimension 2', fontsize=12, fontweight='bold')
+    ax.set_xlabel('')
+    ax.set_ylabel('')
     ax.tick_params(axis='both', which='major', labelsize=10)
     ax.set_aspect('equal')
     
@@ -665,9 +664,7 @@ def plot_umap(features, labels, num_classes=3, save_path=None, class_names=None,
     )
     legend.get_frame().set_linewidth(0.8)
     
-    # Optional title
-    if title:
-        ax.set_title(title, fontsize=13, fontweight='bold', pad=10)
+
     
     plt.tight_layout()
     
