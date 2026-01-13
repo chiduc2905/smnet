@@ -51,7 +51,7 @@ def run_experiment(model, shot, samples, dataset_path, dataset_name, project):
         '--lr', '1e-3',
         '--eta_min', '1e-5',
         '--weight_decay', '1e-4',
-        '--margin_type', 'cosface',  # Enable CosFace margin loss
+        '--margin_type', 'arcface',  # Enable ArcFace margin loss
         '--episode_num_train', '100',
         '--episode_num_val', '150',
         '--episode_num_test', '150',
