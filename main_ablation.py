@@ -1,11 +1,14 @@
 """USCMambaNet Ablation Training Script.
 
 Trains USCMambaNet with specific components enabled/disabled for ablation studies:
-    - dualpath: With/without dual-path (local+global) feature extraction
-    - unified_attention: With/without unified multi-scale attention
-    - cross_attention: With/without prototype cross-attention
+    - dualpath: local_only, global_only, or both
+    - unified_attention: with or without
+    - cross_attention: with or without
 
 NOTE: ArcFace/CosFace is NOT used in ablation experiments.
+
+Results are saved to results/ folder in format:
+    results_{dataset}_{ablation_type}_{mode}_{samples}samples_{shot}shot.txt
 """
 import os
 import argparse
@@ -51,8 +54,7 @@ def get_args():
                         choices=['dualpath', 'unified_attention', 'cross_attention'],
                         help='Type of ablation study')
     parser.add_argument('--ablation_mode', type=str, required=True,
-                        choices=['with', 'without'],
-                        help='Mode: with or without the component')
+                        help='Mode: dualpath=(local_only|global_only|both), others=(with|without)')
     
     # Few-shot settings
     parser.add_argument('--way_num', type=int, default=3)
@@ -88,21 +90,20 @@ def get_ablation_config(ablation_type: str, ablation_mode: str) -> dict:
     
     Returns a dict of flags to pass to USCMambaNet.
     """
-    # Default: everything enabled
+    # Default: everything enabled with full dualpath
     config = {
-        'use_dualpath': True,
+        'dualpath_mode': 'both',
         'use_unified_attention': True,
         'use_cross_attention': True,
     }
     
-    # Disable specific component based on ablation
-    if ablation_mode == 'without':
-        if ablation_type == 'dualpath':
-            config['use_dualpath'] = False
-        elif ablation_type == 'unified_attention':
-            config['use_unified_attention'] = False
-        elif ablation_type == 'cross_attention':
-            config['use_cross_attention'] = False
+    if ablation_type == 'dualpath':
+        # dualpath modes: local_only, global_only, both
+        config['dualpath_mode'] = ablation_mode
+    elif ablation_type == 'unified_attention':
+        config['use_unified_attention'] = (ablation_mode == 'with')
+    elif ablation_type == 'cross_attention':
+        config['use_cross_attention'] = (ablation_mode == 'with')
     
     return config
 
@@ -115,14 +116,12 @@ def get_model(args):
     ablation_config = get_ablation_config(args.ablation_type, args.ablation_mode)
     
     print(f"\nAblation Config: {args.ablation_type} = {args.ablation_mode}")
-    print(f"  use_dualpath: {ablation_config['use_dualpath']}")
+    print(f"  dualpath_mode: {ablation_config['dualpath_mode']}")
     print(f"  use_unified_attention: {ablation_config['use_unified_attention']}")
     print(f"  use_cross_attention: {ablation_config['use_cross_attention']}")
     
     model = USCMambaNet(
         in_channels=3,
-        way_num=args.way_num,
-        shot_num=args.shot_num,
         **ablation_config
     )
     
@@ -190,10 +189,8 @@ def train_loop(net, train_loader, val_X, val_y, args):
             loss_main = criterion_main(scores, targets)
             
             # Center loss (small regularization)
-            # Get query features for center loss
             query_flat = query.view(-1, C, H, W)
             query_features = net.extract_features(query_flat)
-            # Pool if needed
             if query_features.dim() == 3:
                 query_features = query_features.mean(dim=1)
             loss_center = criterion_center(query_features, targets.repeat(B) if B > 1 else targets)
@@ -345,7 +342,7 @@ def test_final(net, loader, args):
     wandb.run.summary["test_accuracy_mean"] = acc_mean
     wandb.run.summary["test_accuracy_std"] = acc_std
     
-    # Save results
+    # Save results to file
     samples_str = f"{args.training_samples}samples" if args.training_samples else "all"
     ablation_str = f"{args.ablation_type}_{args.ablation_mode}"
     txt_path = os.path.join(args.path_results, 

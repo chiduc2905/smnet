@@ -1,11 +1,11 @@
 """Unified Ablation Runner - Run ALL ablation experiments.
 
 This script runs ablation studies for USCMambaNet:
-    1. DualPath ablation: with vs without dual-path (local+global)
+    1. DualPath ablation: local_only, global_only, both (feature extraction)
     2. Unified Attention ablation: with vs without unified attention
     3. Cross Attention ablation: with vs without prototype cross-attention
 
-Each ablation produces a comparison table and logs to WandB.
+Each ablation produces results files for comparison.
 NOTE: ArcFace/CosFace is NOT used in ablation experiments.
 
 Usage:
@@ -65,23 +65,20 @@ class AblationConfig:
 
 ABLATION_DUALPATH = {
     'name': 'dualpath',
-    'description': 'DualPath: With vs Without dual-path (local+global) feature extraction',
-    'modes': ['without', 'with'],
-    'flag': '--use_dualpath',
+    'description': 'DualPath: local_only vs global_only vs both',
+    'modes': ['local_only', 'global_only', 'both'],
 }
 
 ABLATION_UNIFIED_ATTENTION = {
     'name': 'unified_attention',
-    'description': 'Unified Attention: With vs Without unified multi-scale attention',
+    'description': 'Unified Attention: Without vs With',
     'modes': ['without', 'with'],
-    'flag': '--use_unified_attention',
 }
 
 ABLATION_CROSS_ATTENTION = {
     'name': 'cross_attention',
-    'description': 'Cross Attention: With vs Without prototype cross-attention',
+    'description': 'Cross Attention: Without vs With',
     'modes': ['without', 'with'],
-    'flag': '--use_cross_attention',
 }
 
 ALL_ABLATIONS = [ABLATION_DUALPATH, ABLATION_UNIFIED_ATTENTION, ABLATION_CROSS_ATTENTION]
@@ -103,7 +100,7 @@ def run_single_experiment(
     Args:
         config: AblationConfig
         ablation_type: 'dualpath', 'unified_attention', or 'cross_attention'
-        mode: 'with' or 'without'
+        mode: Mode within the ablation type
         shot: Shot number (1, 5)
         training_samples: Number of training samples
         

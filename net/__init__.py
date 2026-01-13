@@ -6,13 +6,11 @@ backbone feature extraction modules, and few-shot networks.
 
 from . import metrics
 from . import backbone
-from .slot_fewshot import SMNet
-from .class_aware_fewshot import ClassAwareSMNet, build_class_aware_smnet
+from .usc_mamba_net import USCMambaNet, build_usc_mamba_net
 
 __all__ = [
     'metrics',
     'backbone',
-    'SMNet',
-    'ClassAwareSMNet',
-    'build_class_aware_smnet',
+    'USCMambaNet',
+    'build_usc_mamba_net',
 ]

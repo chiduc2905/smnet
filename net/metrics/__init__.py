@@ -5,7 +5,7 @@ Extracted from baseline models for reuse in proposed architectures.
 
 from .euclidean import EuclideanDistance, squared_euclidean_distance
 from .cosine import CosineBlock, cosine_similarity
-from .covariance import CovaBlock, SlotCovarianceBlock
+from .covariance import CovaBlock
 from .relation import RelationBlock
 from .local_knn import LocalKNN, local_knn_score
 from .emd import SinkhornDistance, sinkhorn_distance
@@ -20,6 +20,8 @@ from .class_conditional_cosine import (
     ClassConditionalCosine,
     ClassConditionalCosineWithPatches
 )
+from .hybrid_similarity_head import CosineSimilarityHead
+from .prototype_cross_attention import PrototypeCrossAttention
 
 __all__ = [
     # Distance/Similarity functions
@@ -28,7 +30,6 @@ __all__ = [
     'CosineBlock',
     'cosine_similarity',
     'CovaBlock',
-    'SlotCovarianceBlock',
     'RelationBlock',
     'LocalKNN',
     'local_knn_score',
@@ -43,4 +44,7 @@ __all__ = [
     # Class-conditional cosine
     'ClassConditionalCosine',
     'ClassConditionalCosineWithPatches',
+    # USCMambaNet components
+    'CosineSimilarityHead',
+    'PrototypeCrossAttention',
 ]

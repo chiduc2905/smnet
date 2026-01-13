@@ -15,7 +15,7 @@ CosineSimilarityHead:
     - Cosine Similarity × temperature
 
 Ablation Flags:
-    - use_dualpath: Enable/disable dual-path (local+global) feature extraction
+    - dualpath_mode: 'both', 'local_only', 'global_only', or 'none'
     - use_unified_attention: Enable/disable unified multi-scale attention
     - use_cross_attention: Enable/disable prototype cross-attention
 """
@@ -86,7 +86,7 @@ class USCMambaNet(nn.Module):
         temperature: Temperature for cosine similarity (default: 16.0)
         cross_attn_alpha: Residual weight for cross-attention (default: 0.1)
         use_projection: Whether to use bottleneck projection (default: True)
-        use_dualpath: Enable dual-path (local+global) feature extraction (default: True)
+        dualpath_mode: 'both', 'local_only', 'global_only', or 'none' (default: 'both')
         use_unified_attention: Enable unified multi-scale attention (default: True)
         use_cross_attention: Enable prototype cross-attention (default: True)
         device: Device to use
@@ -103,7 +103,7 @@ class USCMambaNet(nn.Module):
         cross_attn_alpha: float = 0.1,
         use_projection: bool = True,
         # Ablation flags
-        use_dualpath: bool = True,
+        dualpath_mode: str = 'both',  # 'both', 'local_only', 'global_only', 'none'
         use_unified_attention: bool = True,
         use_cross_attention: bool = True,
         device: str = 'cuda',
@@ -117,7 +117,7 @@ class USCMambaNet(nn.Module):
         self.use_projection = use_projection
         
         # Ablation flags
-        self.use_dualpath = use_dualpath
+        self.dualpath_mode = dualpath_mode
         self.use_unified_attention = use_unified_attention
         self.use_cross_attention = use_cross_attention
         
@@ -155,16 +155,17 @@ class USCMambaNet(nn.Module):
         self.channel_proj_norm = nn.GroupNorm(num_groups=8, num_channels=hidden_dim)
         
         # ============================================================
-        # STAGE 5: Feature Extraction (ADD-based) - ABLATION: use_dualpath
+        # STAGE 5: Feature Extraction (ADD-based) - ABLATION: dualpath_mode
         # ============================================================
-        if self.use_dualpath:
+        if self.dualpath_mode != 'none':
             self.dual_branch = DualBranchFusion(
                 channels=hidden_dim,
                 d_state=d_state,
-                dilation=2
+                dilation=2,
+                mode=self.dualpath_mode  # 'both', 'local_only', or 'global_only'
             )
         else:
-            # Simple identity - no dual branch processing
+            # No dual branch processing - identity
             self.dual_branch = nn.Identity()
         
         # ============================================================
