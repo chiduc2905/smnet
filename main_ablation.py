@@ -1,7 +1,11 @@
-"""SMNet Ablation Training Script.
+"""USCMambaNet Ablation Training Script.
 
-Simple wrapper that calls main.py with ablation mode flags.
-For now, runs standard SMNet training - ablation configs will be added to SMNet model.
+Trains USCMambaNet with specific components enabled/disabled for ablation studies:
+    - dualpath: With/without dual-path (local+global) feature extraction
+    - unified_attention: With/without unified multi-scale attention
+    - cross_attention: With/without prototype cross-attention
+
+NOTE: ArcFace/CosFace is NOT used in ablation experiments.
 """
 import os
 import argparse
@@ -23,8 +27,8 @@ from function.function import (
     plot_confusion_matrix, plot_tsne, plot_training_curves
 )
 
-# Model - uses standard SMNet for now
-from net.slot_fewshot import SMNet
+# Model
+from net.usc_mamba_net import USCMambaNet
 
 
 # =============================================================================
@@ -33,30 +37,28 @@ from net.slot_fewshot import SMNet
 
 def get_args():
     """Parse command line arguments."""
-    parser = argparse.ArgumentParser(description='SMNet Ablation Training')
+    parser = argparse.ArgumentParser(description='USCMambaNet Ablation Training')
     
     # Paths
-    parser.add_argument('--dataset_path', type=str, default='/mnt/disk2/nhatnc/res/scalogram_fewshot/proposed_model/smnet/scalogram_official')
+    parser.add_argument('--dataset_path', type=str, 
+                        default='/mnt/disk2/nhatnc/res/scalogram_fewshot/proposed_model/smnet/scalogram_official')
     parser.add_argument('--path_weights', type=str, default='checkpoints/')
     parser.add_argument('--path_results', type=str, default='results/')
     parser.add_argument('--dataset_name', type=str, default='minh')
     
     # Ablation settings
     parser.add_argument('--ablation_type', type=str, required=True,
-                        choices=['dual_branch', 'slot_refinement', 'slot_attention', 'saff'])
+                        choices=['dualpath', 'unified_attention', 'cross_attention'],
+                        help='Type of ablation study')
     parser.add_argument('--ablation_mode', type=str, required=True,
-                        help='Mode within ablation type')
-    
-    # Model
-    parser.add_argument('--num_slots', type=int, default=5)
-    parser.add_argument('--slot_iters', type=int, default=5)
-    parser.add_argument('--lambda_init', type=float, default=2.0)
+                        choices=['with', 'without'],
+                        help='Mode: with or without the component')
     
     # Few-shot settings
     parser.add_argument('--way_num', type=int, default=3)
     parser.add_argument('--shot_num', type=int, default=1)
     parser.add_argument('--query_num', type=int, default=5)
-    parser.add_argument('--image_size', type=int, default=64)
+    parser.add_argument('--image_size', type=int, default=128)
     
     # Training
     parser.add_argument('--training_samples', type=int, default=None)
@@ -66,42 +68,61 @@ def get_args():
     parser.add_argument('--num_epochs', type=int, default=100)
     parser.add_argument('--batch_size', type=int, default=1)
     parser.add_argument('--lr', type=float, default=1e-3, help='Base learning rate')
-    parser.add_argument('--min_lr', type=float, default=1e-5, help='Min LR for cosine')
-    parser.add_argument('--start_lr', type=float, default=1e-5, help='Start LR for warmup')
-    parser.add_argument('--warmup_iters', type=int, default=500, help='Warmup iterations')
-    parser.add_argument('--temperature', type=float, default=0.5,
-                        help='Temperature for similarity scaling')
+    parser.add_argument('--eta_min', type=float, default=1e-5, help='Min LR for cosine')
+    parser.add_argument('--weight_decay', type=float, default=1e-4)
     parser.add_argument('--grad_clip', type=float, default=1.0)
-    parser.add_argument('--step_size', type=int, default=10,
-                        help='StepLR step size (epochs)')
-    parser.add_argument('--gamma', type=float, default=0.1,
-                        help='StepLR gamma (LR multiplier)')
     parser.add_argument('--seed', type=int, default=42)
     
+    # Loss weights
+    parser.add_argument('--lambda_center', type=float, default=0.01,
+                        help='Weight for center loss')
+    
     # WandB
-    parser.add_argument('--project', type=str, default='smnet-ablation')
+    parser.add_argument('--project', type=str, default='uscmamba-ablation')
     
     return parser.parse_args()
 
 
-def get_model(args):
-    """Initialize SMNet model with ablation config."""
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+def get_ablation_config(ablation_type: str, ablation_mode: str) -> dict:
+    """Get model configuration based on ablation type and mode.
     
-    # Ablation config passed to SMNet
-    ablation_config = {
-        'ablation_type': args.ablation_type,
-        'ablation_mode': args.ablation_mode,
+    Returns a dict of flags to pass to USCMambaNet.
+    """
+    # Default: everything enabled
+    config = {
+        'use_dualpath': True,
+        'use_unified_attention': True,
+        'use_cross_attention': True,
     }
     
-    model = SMNet(
-        in_channels=3,  # RGB
-        num_slots=args.num_slots,
-        slot_iters=args.slot_iters,
-        lambda_init=args.lambda_init,
-        temperature=args.temperature,
-        device=str(device),
-        # Ablation config (SMNet will handle)
+    # Disable specific component based on ablation
+    if ablation_mode == 'without':
+        if ablation_type == 'dualpath':
+            config['use_dualpath'] = False
+        elif ablation_type == 'unified_attention':
+            config['use_unified_attention'] = False
+        elif ablation_type == 'cross_attention':
+            config['use_cross_attention'] = False
+    
+    return config
+
+
+def get_model(args):
+    """Initialize USCMambaNet model with ablation config."""
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    
+    # Get ablation-specific configuration
+    ablation_config = get_ablation_config(args.ablation_type, args.ablation_mode)
+    
+    print(f"\nAblation Config: {args.ablation_type} = {args.ablation_mode}")
+    print(f"  use_dualpath: {ablation_config['use_dualpath']}")
+    print(f"  use_unified_attention: {ablation_config['use_unified_attention']}")
+    print(f"  use_cross_attention: {ablation_config['use_cross_attention']}")
+    
+    model = USCMambaNet(
+        in_channels=3,
+        way_num=args.way_num,
+        shot_num=args.shot_num,
         **ablation_config
     )
     
@@ -113,30 +134,29 @@ def get_model(args):
 # =============================================================================
 
 def train_loop(net, train_loader, val_X, val_y, args):
-    """Train with CosineAnnealingLR + Warmup (per-iteration LR adjustment)."""
+    """Train with CosineAnnealingLR."""
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
     criterion_main = ContrastiveLoss().to(device)
     
-    # Calculate feature dimension
-    # SMNet uses extract_features which returns (B, N_patches, hidden_dim)
+    # Get feature dimension from model
     with torch.no_grad():
         dummy_input = torch.randn(1, 3, args.image_size, args.image_size).to(device)
-        dummy_patches = net.extract_features(dummy_input)  # (1, N, C)
-        feat_dim = dummy_patches.shape[-1]  # hidden_dim
+        dummy_feat = net.extract_features(dummy_input)
+        feat_dim = dummy_feat.shape[-1]
         
     criterion_center = CenterLoss(num_classes=args.way_num, feat_dim=feat_dim, device=device)
     
-    optimizer = optim.Adam([
+    optimizer = optim.AdamW([
         {'params': net.parameters()},
         {'params': criterion_center.parameters()}
-    ], lr=args.lr)
+    ], lr=args.lr, weight_decay=args.weight_decay)
     
-    # StepLR Scheduler - simple step decay
-    scheduler = lr_scheduler.StepLR(
+    # Cosine Annealing Scheduler
+    scheduler = lr_scheduler.CosineAnnealingLR(
         optimizer, 
-        step_size=args.step_size,
-        gamma=args.gamma
+        T_max=args.num_epochs,
+        eta_min=args.eta_min
     )
     
     history = {'train_acc': [], 'val_acc': [], 'train_loss': [], 'val_loss': []}
@@ -166,7 +186,19 @@ def train_loop(net, train_loader, val_X, val_y, args):
                 train_correct += (preds == targets).sum().item()
                 train_total += targets.size(0)
             
-            loss = criterion_main(scores, targets)
+            # Main loss (CE/Contrastive)
+            loss_main = criterion_main(scores, targets)
+            
+            # Center loss (small regularization)
+            # Get query features for center loss
+            query_flat = query.view(-1, C, H, W)
+            query_features = net.extract_features(query_flat)
+            # Pool if needed
+            if query_features.dim() == 3:
+                query_features = query_features.mean(dim=1)
+            loss_center = criterion_center(query_features, targets.repeat(B) if B > 1 else targets)
+            
+            loss = loss_main + args.lambda_center * loss_center
             loss.backward()
             
             if args.grad_clip > 0:
@@ -177,11 +209,12 @@ def train_loop(net, train_loader, val_X, val_y, args):
             current_lr = optimizer.param_groups[0]['lr']
             pbar.set_postfix(loss=f'{loss.item():.4f}', lr=f'{current_lr:.2e}')
         
-        # Step scheduler at end of epoch
+        # Step scheduler
         scheduler.step()
         
         train_acc = train_correct / train_total if train_total > 0 else 0
         
+        # Validation
         val_ds = FewshotDataset(val_X, val_y, args.episode_num_val,
                                 args.way_num, args.shot_num, args.query_num, args.seed + epoch)
         val_loader = DataLoader(val_ds, batch_size=1, shuffle=False)
@@ -328,6 +361,8 @@ def test_final(net, loader, args):
         f.write(f"Recall: {rec:.4f}\n")
         f.write(f"F1-Score: {f1:.4f}\n")
     print(f"Results saved to {txt_path}")
+    
+    return acc_mean, acc_std
 
 
 # =============================================================================
@@ -339,11 +374,11 @@ def main():
     args.device = 'cuda' if torch.cuda.is_available() else 'cpu'
     
     print(f"\n{'='*60}")
-    print(f"SMNet Ablation: {args.ablation_type} - {args.ablation_mode}")
+    print(f"USCMambaNet Ablation: {args.ablation_type} - {args.ablation_mode}")
     print('='*60)
     print(f"Config: {args.shot_num}-shot | {args.num_epochs} epochs | Device: {args.device}")
     print(f"Training samples: {args.training_samples}")
-    print(f"NOTE: Ablation config is logged but architecture runs standard SMNet for now")
+    print(f"NOTE: ArcFace/CosFace is DISABLED for ablation experiments")
     
     # Initialize WandB
     samples_str = f"{args.training_samples}samples" if args.training_samples else "all"

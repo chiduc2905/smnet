@@ -13,6 +13,11 @@ CosineSimilarityHead:
     - Bottleneck (Linear → LayerNorm)
     - L2 Normalize
     - Cosine Similarity × temperature
+
+Ablation Flags:
+    - use_dualpath: Enable/disable dual-path (local+global) feature extraction
+    - use_unified_attention: Enable/disable unified multi-scale attention
+    - use_cross_attention: Enable/disable prototype cross-attention
 """
 import torch
 import torch.nn as nn
@@ -81,6 +86,9 @@ class USCMambaNet(nn.Module):
         temperature: Temperature for cosine similarity (default: 16.0)
         cross_attn_alpha: Residual weight for cross-attention (default: 0.1)
         use_projection: Whether to use bottleneck projection (default: True)
+        use_dualpath: Enable dual-path (local+global) feature extraction (default: True)
+        use_unified_attention: Enable unified multi-scale attention (default: True)
+        use_cross_attention: Enable prototype cross-attention (default: True)
         device: Device to use
     """
     
@@ -94,8 +102,12 @@ class USCMambaNet(nn.Module):
         temperature: float = 16.0,
         cross_attn_alpha: float = 0.1,
         use_projection: bool = True,
+        # Ablation flags
+        use_dualpath: bool = True,
+        use_unified_attention: bool = True,
+        use_cross_attention: bool = True,
         device: str = 'cuda',
-        **kwargs  # For backward compatibility (delta_lambda, etc.)
+        **kwargs  # For backward compatibility
     ):
         super().__init__()
         
@@ -103,6 +115,11 @@ class USCMambaNet(nn.Module):
         self.device = device
         self.temperature = temperature
         self.use_projection = use_projection
+        
+        # Ablation flags
+        self.use_dualpath = use_dualpath
+        self.use_unified_attention = use_unified_attention
+        self.use_cross_attention = use_cross_attention
         
         # ============================================================
         # STAGE 1: Patch Embedding
@@ -138,26 +155,37 @@ class USCMambaNet(nn.Module):
         self.channel_proj_norm = nn.GroupNorm(num_groups=8, num_channels=hidden_dim)
         
         # ============================================================
-        # STAGE 5: Feature Extraction (ADD-based)
+        # STAGE 5: Feature Extraction (ADD-based) - ABLATION: use_dualpath
         # ============================================================
-        self.dual_branch = DualBranchFusion(
-            channels=hidden_dim,
-            d_state=d_state,
-            dilation=2
-        )
+        if self.use_dualpath:
+            self.dual_branch = DualBranchFusion(
+                channels=hidden_dim,
+                d_state=d_state,
+                dilation=2
+            )
+        else:
+            # Simple identity - no dual branch processing
+            self.dual_branch = nn.Identity()
         
         # ============================================================
-        # STAGE 6: Feature Selection (MUL-based)
+        # STAGE 6: Feature Selection (MUL-based) - ABLATION: use_unified_attention
         # ============================================================
-        self.unified_attention = UnifiedSpatialChannelAttention(hidden_dim)
+        if self.use_unified_attention:
+            self.unified_attention = UnifiedSpatialChannelAttention(hidden_dim)
+        else:
+            # Simple identity - no attention
+            self.unified_attention = nn.Identity()
         
         # ============================================================
-        # STAGE 7: Prototype Cross-Attention (Query Refinement)
+        # STAGE 7: Prototype Cross-Attention - ABLATION: use_cross_attention
         # ============================================================
-        self.proto_cross_attn = PrototypeCrossAttention(
-            channels=hidden_dim,
-            alpha=cross_attn_alpha
-        )
+        if self.use_cross_attention:
+            self.proto_cross_attn = PrototypeCrossAttention(
+                channels=hidden_dim,
+                alpha=cross_attn_alpha
+            )
+        else:
+            self.proto_cross_attn = None
         
         # ============================================================
         # STAGE 8: Cosine Similarity Head (Bottleneck → L2 → Cosine)
@@ -193,15 +221,27 @@ class USCMambaNet(nn.Module):
         # Linear proj + GroupNorm, NO activation (reduce nonlinearity)
         f_proj = self.channel_proj_conv(f)
         f_proj = self.channel_proj_norm(f_proj)
-        # Skip connection if dims differ, just use proj
         f = f_proj
         
-        # Stage 5: Dual branch fusion (ADD-based)
+        # Stage 5: Dual branch fusion (ADD-based) - conditional
         f = self.dual_branch(f)
         
-        # Stage 6: Unified attention (MUL-based)
+        # Stage 6: Unified attention (MUL-based) - conditional
         f = self.unified_attention(f)
         
+        return f
+    
+    def extract_features(self, x: torch.Tensor) -> torch.Tensor:
+        """Extract features for external use (e.g., t-SNE, center loss).
+        
+        Args:
+            x: (B, C, H, W) input images
+            
+        Returns:
+            features: (B, hidden_dim) pooled features
+        """
+        f = self.encode(x)  # (B, hidden_dim, H', W')
+        f = f.mean(dim=[2, 3])  # GAP → (B, hidden_dim)
         return f
     
     def forward(
@@ -213,7 +253,7 @@ class USCMambaNet(nn.Module):
         
         Pipeline:
             1. Encode query and support images
-            2. PrototypeCrossAttention: Refine query with prototype maps
+            2. PrototypeCrossAttention: Refine query with prototype maps (if enabled)
             3. GAP on refined queries
             4. CosineSimilarityHead: Bottleneck → L2 → Cosine
         
@@ -242,37 +282,42 @@ class USCMambaNet(nn.Module):
             s_features = self.encode(s_flat)  # (Way*Shot, hidden, H', W')
             
             # ============================================================
-            # Step 2: Prototype Cross-Attention (refine query)
+            # Step 2: Prototype Cross-Attention (refine query) - conditional
             # ============================================================
-            # Q' = softmax(Q·Pᵀ/√C)·P, Q = Q + α*Q'
-            # refined_query: (NQ, Way, hidden, H', W')
-            refined_query, proto_maps = self.proto_cross_attn(
-                query_feat=q_features,
-                support_feat=s_features,
-                way_num=Way,
-                shot_num=Shot
-            )
+            if self.use_cross_attention and self.proto_cross_attn is not None:
+                # Q' = softmax(Q·Pᵀ/√C)·P, Q = Q + α*Q'
+                # refined_query: (NQ, Way, hidden, H', W')
+                refined_query, proto_maps = self.proto_cross_attn(
+                    query_feat=q_features,
+                    support_feat=s_features,
+                    way_num=Way,
+                    shot_num=Shot
+                )
+                
+                # (NQ, Way, hidden, H', W') → (NQ, Way, hidden)
+                q_vectors = refined_query.mean(dim=[3, 4])  # GAP
+                
+                # Support vectors from prototype maps: (Way, hidden, H', W') → (Way, hidden)
+                s_vectors = proto_maps.mean(dim=[2, 3])  # GAP
+            else:
+                # No cross-attention: direct GAP on features
+                # Query: (NQ, hidden, H', W') → (NQ, hidden)
+                q_gap = q_features.mean(dim=[2, 3])  # (NQ, hidden)
+                
+                # Support: (Way*Shot, hidden, H', W') → (Way, hidden)
+                s_gap = s_features.mean(dim=[2, 3])  # (Way*Shot, hidden)
+                s_vectors = s_gap.view(Way, Shot, -1).mean(dim=1)  # (Way, hidden)
+                
+                # Expand q_vectors for each class
+                q_vectors = q_gap.unsqueeze(1).expand(-1, Way, -1)  # (NQ, Way, hidden)
             
             # ============================================================
-            # Step 3: GAP on refined queries
+            # Step 3: Cosine Similarity for each query-prototype pair
             # ============================================================
-            # (NQ, Way, hidden, H', W') → (NQ, Way, hidden)
-            q_vectors = refined_query.mean(dim=[3, 4])  # GAP
-            
-            # Support vectors from prototype maps: (Way, hidden, H', W') → (Way, hidden)
-            s_vectors = proto_maps.mean(dim=[2, 3])  # GAP
-            
-            # ============================================================
-            # Step 4: Cosine Similarity for each query-prototype pair
-            # ============================================================
-            # Project and compute scores
-            # q_vectors: (NQ, Way, hidden), s_vectors: (Way, hidden)
-            
-            # Project query vectors for each class
             scores_list = []
             for c in range(Way):
-                q_c = q_vectors[:, c, :]  # (NQ, hidden) - query refined for class c
-                s_c = s_vectors[c:c+1, :]  # (1, hidden) - prototype for class c
+                q_c = q_vectors[:, c, :]  # (NQ, hidden)
+                s_c = s_vectors[c:c+1, :]  # (1, hidden)
                 
                 # Project both
                 z_q = self.similarity_head.project(q_c)  # (NQ, D)
@@ -315,9 +360,4 @@ def build_usc_mamba_net(
     Returns:
         Configured USCMambaNet
     """
-    return USCMambaNet(aggregation=aggregation, **kwargs)
-
-
-# Aliases for backward compatibility
-SlotFreeSMNet = USCMambaNet
-build_slot_free_smnet = build_usc_mamba_net
+    return USCMambaNet(**kwargs)

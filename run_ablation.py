@@ -1,16 +1,17 @@
 """Unified Ablation Runner - Run ALL ablation experiments.
 
-This script runs all ablation studies in sequence:
-    1. DualBranch ablation: local_only, global_only, both
-    2. Slot Refinement (SCA+CMA): none, sca_only, cma_only, both
-    3. SlotAttention: without, with
+This script runs ablation studies for USCMambaNet:
+    1. DualPath ablation: with vs without dual-path (local+global)
+    2. Unified Attention ablation: with vs without unified attention
+    3. Cross Attention ablation: with vs without prototype cross-attention
 
 Each ablation produces a comparison table and logs to WandB.
+NOTE: ArcFace/CosFace is NOT used in ablation experiments.
 
 Usage:
-    python run_ablation.py --ablation dual_branch
-    python run_ablation.py --ablation slot_refinement
-    python run_ablation.py --ablation slot_attention
+    python run_ablation.py --ablation dualpath
+    python run_ablation.py --ablation unified_attention
+    python run_ablation.py --ablation cross_attention
     python run_ablation.py --ablation all
 """
 import os
@@ -18,7 +19,7 @@ import sys
 import argparse
 import subprocess
 from dataclasses import dataclass, field
-from typing import List, Dict, Optional
+from typing import List, Dict
 from datetime import datetime
 
 
@@ -42,10 +43,9 @@ class AblationConfig:
     # Training
     training_samples_list: List[int] = field(default_factory=lambda: [30, 60, 150])
     num_epochs: int = 100
-    lr: float = 1e-3  # Base LR
-    step_size: int = 10  # StepLR step size
-    gamma: float = 0.1  # StepLR gamma
-    temperature: float = 0.5  # Similarity temperature
+    lr: float = 1e-3
+    eta_min: float = 1e-5
+    weight_decay: float = 1e-4
     
     # Episodes
     episode_num_train: int = 100
@@ -53,67 +53,38 @@ class AblationConfig:
     episode_num_test: int = 150
     
     # WandB
-    project: str = 'smnet-ablation'
+    project: str = 'uscmamba-ablation'
     
     # Image
-    image_size: int = 64
-
-
-# Minimum samples calculation
-def calculate_min_samples(way_num: int, max_shot: int, query_num: int) -> Dict[str, int]:
-    """Calculate minimum samples needed per split.
-    
-    Args:
-        way_num: Number of classes (Way)
-        max_shot: Maximum shot number (e.g., 10 for 10-shot)
-        query_num: Query samples per class
-        
-    Returns:
-        Dict with per_class and total minimums
-    """
-    per_class = max_shot + query_num
-    total = way_num * per_class
-    
-    return {
-        'per_class': per_class,
-        'total': total,
-        'formula': f'{max_shot} (shot) + {query_num} (query) = {per_class}'
-    }
+    image_size: int = 128
 
 
 # =============================================================================
 # Ablation Definitions
 # =============================================================================
 
-ABLATION_DUAL_BRANCH = {
-    'name': 'dual_branch',
-    'description': 'DualBranchFusion: Local vs Global vs Both',
-    'modes': ['local_only', 'global_only', 'both'],
-    'flag': '--dual_branch_mode',
-}
-
-ABLATION_SLOT_REFINEMENT = {
-    'name': 'slot_refinement',
-    'description': 'M5 (SCA) + M6 (CMA): None vs SCA vs CMA vs Both',
-    'modes': ['none', 'sca_only', 'cma_only', 'both'],
-    'flag': '--slot_refinement_mode',
-}
-
-ABLATION_SLOT_ATTENTION = {
-    'name': 'slot_attention',
-    'description': 'SlotAttention: Without vs With',
+ABLATION_DUALPATH = {
+    'name': 'dualpath',
+    'description': 'DualPath: With vs Without dual-path (local+global) feature extraction',
     'modes': ['without', 'with'],
-    'flag': '--slot_attention_mode',
+    'flag': '--use_dualpath',
 }
 
-ABLATION_SAFF = {
-    'name': 'saff',
-    'description': 'SAFF Module: Without vs With',
+ABLATION_UNIFIED_ATTENTION = {
+    'name': 'unified_attention',
+    'description': 'Unified Attention: With vs Without unified multi-scale attention',
     'modes': ['without', 'with'],
-    'flag': '--saff_mode',
+    'flag': '--use_unified_attention',
 }
 
-ALL_ABLATIONS = [ABLATION_DUAL_BRANCH, ABLATION_SLOT_REFINEMENT, ABLATION_SLOT_ATTENTION, ABLATION_SAFF]
+ABLATION_CROSS_ATTENTION = {
+    'name': 'cross_attention',
+    'description': 'Cross Attention: With vs Without prototype cross-attention',
+    'modes': ['without', 'with'],
+    'flag': '--use_cross_attention',
+}
+
+ALL_ABLATIONS = [ABLATION_DUALPATH, ABLATION_UNIFIED_ATTENTION, ABLATION_CROSS_ATTENTION]
 
 
 # =============================================================================
@@ -131,15 +102,15 @@ def run_single_experiment(
     
     Args:
         config: AblationConfig
-        ablation_type: 'dual_branch', 'slot_refinement', or 'slot_attention'
-        mode: Mode within the ablation type
-        shot: Shot number (1, 5, 10)
+        ablation_type: 'dualpath', 'unified_attention', or 'cross_attention'
+        mode: 'with' or 'without'
+        shot: Shot number (1, 5)
         training_samples: Number of training samples
         
     Returns:
         True if successful
     """
-    # Build command
+    # Build command - use main_ablation.py
     cmd = [
         sys.executable, 'main_ablation.py',
         '--ablation_type', ablation_type,
@@ -153,9 +124,8 @@ def run_single_experiment(
         '--project', config.project,
         '--num_epochs', str(config.num_epochs),
         '--lr', str(config.lr),
-        '--step_size', str(config.step_size),
-        '--gamma', str(config.gamma),
-        '--temperature', str(config.temperature),
+        '--eta_min', str(config.eta_min),
+        '--weight_decay', str(config.weight_decay),
         '--episode_num_train', str(config.episode_num_train),
         '--episode_num_val', str(config.episode_num_val),
         '--episode_num_test', str(config.episode_num_test),
@@ -172,8 +142,8 @@ def run_single_experiment(
         print(f"  ✗ Failed: {e}")
         return False
     except FileNotFoundError:
-        print(f"  ✗ main_ablation.py not found, using placeholder")
-        return True  # Placeholder, will be created
+        print(f"  ✗ main_ablation.py not found")
+        return False
 
 
 def run_ablation_study(ablation: Dict, config: AblationConfig) -> Dict:
@@ -277,21 +247,23 @@ def print_summary(all_results: Dict):
 # =============================================================================
 
 def get_args():
-    parser = argparse.ArgumentParser(description='Run SMNet ablation studies')
+    parser = argparse.ArgumentParser(description='Run USCMambaNet ablation studies')
     
     parser.add_argument('--ablation', type=str, default='all',
-                        choices=['dual_branch', 'slot_refinement', 'slot_attention', 'saff', 'all'],
+                        choices=['dualpath', 'unified_attention', 'cross_attention', 'all'],
                         help='Which ablation to run')
     
-    parser.add_argument('--dataset_path', type=str, default='/mnt/disk2/nhatnc/res/scalogram_fewshot/proposed_model/smnet/scalogram_official')
+    parser.add_argument('--dataset_path', type=str, 
+                        default='/mnt/disk2/nhatnc/res/scalogram_fewshot/proposed_model/smnet/scalogram_official')
     parser.add_argument('--dataset_name', type=str, default='minh')
-    parser.add_argument('--project', type=str, default='smnet-ablation')
+    parser.add_argument('--project', type=str, default='uscmamba-ablation')
     
     parser.add_argument('--query_num', type=int, default=5,
                         help='Query samples per class (default: 5)')
     parser.add_argument('--num_epochs', type=int, default=100)
+    parser.add_argument('--image_size', type=int, default=128)
     
-    parser.add_argument('--training_samples', type=str, default='80,200,600,6000',
+    parser.add_argument('--training_samples', type=str, default='30,60,150',
                         help='Comma-separated list of training sample sizes')
     
     parser.add_argument('--dry_run', action='store_true',
@@ -313,19 +285,18 @@ def main():
         project=args.project,
         query_num=args.query_num,
         num_epochs=args.num_epochs,
+        image_size=args.image_size,
         training_samples_list=training_samples,
     )
     
-    # Print min samples info
-    min_info = calculate_min_samples(config.way_num, max(config.shots), config.query_num)
     print("\n" + "=" * 70)
-    print("MINIMUM SAMPLES CALCULATION")
+    print("USCMAMBA ABLATION STUDY")
     print("=" * 70)
-    print(f"Way (classes): {config.way_num}")
-    print(f"Max shot: {max(config.shots)}")
-    print(f"Query per class: {config.query_num}")
-    print(f"\nMinimum per class: {min_info['per_class']} ({min_info['formula']})")
-    print(f"Minimum total per split: {min_info['total']}")
+    print(f"Ablations: {args.ablation}")
+    print(f"Shots: {config.shots}")
+    print(f"Training samples: {config.training_samples_list}")
+    print(f"Image size: {config.image_size}")
+    print(f"NOTE: ArcFace/CosFace is DISABLED for ablation experiments")
     print("=" * 70)
     
     if args.dry_run:
