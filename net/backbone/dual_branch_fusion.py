@@ -304,131 +304,309 @@ LocalMidBranch = LocalAGLKABranch
 # Branch 2: Vision State Space (VSS) Block - Lightweight for 64x64 Few-Shot
 # =============================================================================
 
-class VSSBlock(nn.Module):
-    """Lightweight VSS Block optimized for 64×64 few-shot learning.
+class SS2D(nn.Module):
+    """Selective Scan 2D - MambaU-Lite style with 4 separate weight sets.
     
-    Architecture:
-        Input X
+    Architecture matching the VSS Block diagram:
+        Input (B, H, W, C)
             ↓
-        ┌─────────────────────────────────────────────┐
-        │ Pre-Normalization: X1 = LN(X)               │
-        └─────────────────────────────────────────────┘
-            ↓
-        ┌─────────────────────────────────────────────┐
-        │ SS2D Block:                                 │
-        │   Linear (C→C) → DWConv(k=3) → SiLU        │
-        │   → SS2D (4-way scan) → LN → Linear (C→C)   │
-        └─────────────────────────────────────────────┘
-            ↓
-        ┌─────────────────────────────────────────────┐
-        │ Residual: Y = X + SS2D_Block(X1)            │
-        └─────────────────────────────────────────────┘
-            ↓
-        Output Y
+        Linear (C → 2*d_inner)  →  Split into x, z
+            ↓                         ↓
+        DWConv → SiLU               SiLU
+            ↓                         │
+        SS2D (4-way scan)             │
+            ↓                         │
+        LayerNorm                     │
+            ↓                         │
+            └──── × (multiply) ───────┘
+                      ↓
+                Linear (d_inner → C)
+                      ↓
+                    Output
     
-    Key Design (optimized for few-shot):
-        - expand=1: No channel expansion (C→C, not C→2C)
-        - d_conv=3: Smaller kernel for short sequences
-        - NO FFN: Removed to prevent overfitting
-        - Single residual connection
-        - 4-way SS2D with independent Mamba modules
+    Key: Uses 4 SEPARATE weight sets for 4 scanning directions (K=4).
     
     Args:
         d_model: Model dimension (channels)
-        d_state: SSM state dimension (default: 4)
-        d_conv: Local convolution width in Mamba (default: 3)
-        dw_kernel: Depthwise conv kernel size (default: 3)
+        d_state: SSM state dimension (default: 16)
+        d_conv: Local convolution width (default: 3)
+        expand: Expansion factor for d_inner (default: 2)
+        dropout: Dropout rate (default: 0.0)
     """
     
     def __init__(
         self,
         d_model: int,
-        d_state: int = 4,
+        d_state: int = 8,       # Few-shot optimized (was 16)
         d_conv: int = 3,
-        dw_kernel: int = 3,
-        **kwargs  # Ignore unused args like expand, ffn_expand
+        expand: int = 1,        # Few-shot optimized (was 2)
+        dt_rank: str = "auto",
+        dt_min: float = 0.001,
+        dt_max: float = 0.1,
+        dt_init: str = "random",
+        dt_scale: float = 1.0,
+        dt_init_floor: float = 1e-4,
+        dropout: float = 0.0,
+        conv_bias: bool = True,
+        bias: bool = False,
+        **kwargs
     ):
         super().__init__()
         
         self.d_model = d_model
-        self.d_inner = d_model  # expand=1, no expansion
+        self.d_state = d_state
+        self.d_conv = d_conv
+        self.expand = expand
+        self.d_inner = int(self.expand * self.d_model)
+        self.dt_rank = math.ceil(self.d_model / 16) if dt_rank == "auto" else dt_rank
         
-        if not MAMBA_AVAILABLE:
-            raise ImportError(
-                "mamba-ssm package is required. Install with: pip install mamba-ssm"
-            )
+        # Input projection: C → 2*d_inner (for gating)
+        self.in_proj = nn.Linear(self.d_model, self.d_inner * 2, bias=bias)
         
-        # =============================================
-        # Pre-Normalization
-        # =============================================
-        self.norm1 = nn.LayerNorm(d_model)
-        
-        # =============================================
-        # SS2D Block (Lightweight: C → C)
-        # =============================================
-        # Linear (no expansion)
-        self.in_proj = nn.Linear(d_model, self.d_inner, bias=False)
-        
-        # Depthwise Conv (k=3)
-        self.dw_conv = nn.Conv2d(
-            self.d_inner, self.d_inner,
-            kernel_size=dw_kernel,
-            padding=dw_kernel // 2,
+        # Depthwise Conv2D
+        self.conv2d = nn.Conv2d(
+            in_channels=self.d_inner,
+            out_channels=self.d_inner,
             groups=self.d_inner,
-            bias=False
+            bias=conv_bias,
+            kernel_size=d_conv,
+            padding=(d_conv - 1) // 2,
+        )
+        self.act = nn.SiLU()
+        
+        # =============================================
+        # 4 SEPARATE weight sets for 4 directions (K=4)
+        # =============================================
+        # x_proj: Projects to (dt_rank + d_state*2) for each direction
+        x_proj_list = [
+            nn.Linear(self.d_inner, (self.dt_rank + self.d_state * 2), bias=False)
+            for _ in range(4)
+        ]
+        self.x_proj_weight = nn.Parameter(
+            torch.stack([t.weight for t in x_proj_list], dim=0)  # (K=4, dt_rank+2*d_state, d_inner)
         )
         
-        # Shared Mamba module for all 4 directions (Weight Sharing)
-        self.mamba = Mamba(
-            d_model=self.d_inner,
-            d_state=d_state,
-            d_conv=d_conv,
-            expand=1
+        # dt_projs: Projects dt_rank → d_inner for each direction
+        dt_projs_list = [
+            self._dt_init(self.dt_rank, self.d_inner, dt_scale, dt_init, 
+                          dt_min, dt_max, dt_init_floor)
+            for _ in range(4)
+        ]
+        self.dt_projs_weight = nn.Parameter(
+            torch.stack([t.weight for t in dt_projs_list], dim=0)  # (K=4, d_inner, dt_rank)
+        )
+        self.dt_projs_bias = nn.Parameter(
+            torch.stack([t.bias for t in dt_projs_list], dim=0)  # (K=4, d_inner)
         )
         
-        # Post-SS2D LayerNorm
-        self.norm_ss2d = nn.LayerNorm(self.d_inner)
+        # A_logs: SSM state matrix (log form) - K=4 copies
+        self.A_logs = self._A_log_init(self.d_state, self.d_inner, copies=4, merge=True)
         
-        # Output Linear
-        self.out_proj = nn.Linear(self.d_inner, d_model, bias=False)
+        # Ds: Skip connection parameter - K=4 copies
+        self.Ds = self._D_init(self.d_inner, copies=4, merge=True)
         
-        # NO FFN - removed for few-shot learning
+        # Output normalization and projection
+        self.out_norm = nn.LayerNorm(self.d_inner)
+        self.out_proj = nn.Linear(self.d_inner, self.d_model, bias=bias)
+        self.dropout = nn.Dropout(dropout) if dropout > 0.0 else nn.Identity()
     
-    def _ss2d_forward(self, x: torch.Tensor, H: int, W: int) -> torch.Tensor:
-        """Apply 4-way SS2D scanning with SHARED weights.
+    @staticmethod
+    def _dt_init(dt_rank, d_inner, dt_scale=1.0, dt_init="random", 
+                 dt_min=0.001, dt_max=0.1, dt_init_floor=1e-4):
+        """Initialize dt projection layer."""
+        dt_proj = nn.Linear(dt_rank, d_inner, bias=True)
+        
+        dt_init_std = dt_rank**-0.5 * dt_scale
+        if dt_init == "constant":
+            nn.init.constant_(dt_proj.weight, dt_init_std)
+        elif dt_init == "random":
+            nn.init.uniform_(dt_proj.weight, -dt_init_std, dt_init_std)
+        else:
+            raise NotImplementedError
+        
+        dt = torch.exp(
+            torch.rand(d_inner) * (math.log(dt_max) - math.log(dt_min)) + math.log(dt_min)
+        ).clamp(min=dt_init_floor)
+        inv_dt = dt + torch.log(-torch.expm1(-dt))
+        with torch.no_grad():
+            dt_proj.bias.copy_(inv_dt)
+        
+        return dt_proj
+    
+    @staticmethod
+    def _A_log_init(d_state, d_inner, copies=1, merge=True):
+        """Initialize A in log form (S4D real initialization)."""
+        A = repeat(
+            torch.arange(1, d_state + 1, dtype=torch.float32),
+            "n -> d n",
+            d=d_inner,
+        ).contiguous()
+        A_log = torch.log(A)
+        if copies > 1:
+            A_log = repeat(A_log, "d n -> r d n", r=copies)
+            if merge:
+                A_log = A_log.flatten(0, 1)
+        A_log = nn.Parameter(A_log)
+        A_log._no_weight_decay = True
+        return A_log
+    
+    @staticmethod
+    def _D_init(d_inner, copies=1, merge=True):
+        """Initialize D (skip parameter)."""
+        D = torch.ones(d_inner)
+        if copies > 1:
+            D = repeat(D, "n1 -> r n1", r=copies)
+            if merge:
+                D = D.flatten(0, 1)
+        D = nn.Parameter(D)
+        D._no_weight_decay = True
+        return D
+    
+    def forward_core(self, x: torch.Tensor):
+        """Apply 4-way SS2D scanning with separate weights.
         
         Args:
-            x: (B, L, d_inner) input sequence
-            H, W: spatial dimensions
+            x: (B, d_inner, H, W) input after DWConv + SiLU
             
         Returns:
-            (B, L, d_inner) output after averaged 4-way scanning
+            y: (B, d_inner, H, W) output from 4-way scan fusion
         """
-        B, L, D = x.shape
+        try:
+            from mamba_ssm.ops.selective_scan_interface import selective_scan_fn
+        except ImportError:
+            raise ImportError("mamba_ssm.ops.selective_scan_interface is required")
         
-        # 1. Left-to-Right (row-major)
-        y_lr = self.mamba(x)
+        B, C, H, W = x.shape
+        L = H * W
+        K = 4
         
-        # 2. Right-to-Left (row-major reversed)
-        x_rl = torch.flip(x, dims=[1])
-        y_rl = self.mamba(x_rl)
-        y_rl = torch.flip(y_rl, dims=[1])
+        # Create 4 scanning directions
+        # x_hwwh: (B, 2, d_inner, L) - row-major and col-major
+        x_hwwh = torch.stack([
+            x.view(B, -1, L),  # row-major (H, W) -> L
+            torch.transpose(x, dim0=2, dim1=3).contiguous().view(B, -1, L)  # col-major (W, H) -> L
+        ], dim=1)
         
-        # 3. Top-to-Bottom (column-major)
-        x_tb = x.view(B, H, W, D).permute(0, 2, 1, 3).contiguous().view(B, L, D)
-        y_tb = self.mamba(x_tb)
-        y_tb = y_tb.view(B, W, H, D).permute(0, 2, 1, 3).contiguous().view(B, L, D)
+        # xs: (B, K=4, d_inner, L) - forward and reversed for both
+        xs = torch.cat([x_hwwh, torch.flip(x_hwwh, dims=[-1])], dim=1)
         
-        # 4. Bottom-to-Top (column-major reversed)
-        x_bt = torch.flip(x_tb, dims=[1])
-        y_bt = self.mamba(x_bt)
-        y_bt = torch.flip(y_bt, dims=[1])
-        y_bt = y_bt.view(B, W, H, D).permute(0, 2, 1, 3).contiguous().view(B, L, D)
+        # Project to get dt, B, C for SSM
+        x_dbl = torch.einsum("b k d l, k c d -> b k c l", xs.view(B, K, -1, L), self.x_proj_weight)
+        dts, Bs, Cs = torch.split(x_dbl, [self.dt_rank, self.d_state, self.d_state], dim=2)
+        dts = torch.einsum("b k r l, k d r -> b k d l", dts.view(B, K, -1, L), self.dt_projs_weight)
         
-        # Average fusion
-        y_fused = (y_lr + y_rl + y_tb + y_bt) / 4.0
+        # Prepare for selective scan
+        xs = xs.float().view(B, -1, L)  # (B, K*d_inner, L)
+        dts = dts.contiguous().float().view(B, -1, L)  # (B, K*d_inner, L)
+        Bs = Bs.float().view(B, K, -1, L)  # (B, K, d_state, L)
+        Cs = Cs.float().view(B, K, -1, L)  # (B, K, d_state, L)
+        Ds = self.Ds.float().view(-1)  # (K*d_inner,)
+        As = -torch.exp(self.A_logs.float()).view(-1, self.d_state)  # (K*d_inner, d_state)
+        dt_projs_bias = self.dt_projs_bias.float().view(-1)  # (K*d_inner,)
         
-        return y_fused
+        # Selective scan
+        out_y = selective_scan_fn(
+            xs, dts,
+            As, Bs, Cs, Ds, z=None,
+            delta_bias=dt_projs_bias,
+            delta_softplus=True,
+            return_last_state=False,
+        ).view(B, K, -1, L)
+        
+        # Reverse and transpose back
+        inv_y = torch.flip(out_y[:, 2:4], dims=[-1]).view(B, 2, -1, L)
+        wh_y = torch.transpose(out_y[:, 1].view(B, -1, W, H), dim0=2, dim1=3).contiguous().view(B, -1, L)
+        invwh_y = torch.transpose(inv_y[:, 1].view(B, -1, W, H), dim0=2, dim1=3).contiguous().view(B, -1, L)
+        
+        # Fuse 4 directions: sum
+        y = out_y[:, 0] + inv_y[:, 0] + wh_y + invwh_y
+        y = torch.transpose(y, dim0=1, dim1=2).contiguous().view(B, H, W, -1)
+        
+        return y
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: (B, H, W, C) input features
+            
+        Returns:
+            y: (B, H, W, C) output features
+        """
+        B, H, W, C = x.shape
+        
+        # 1. Input projection → Split (Gating)
+        xz = self.in_proj(x)  # (B, H, W, 2*d_inner)
+        x_feat, z = xz.chunk(2, dim=-1)  # Each (B, H, W, d_inner)
+        
+        # 2. Branch 1: DWConv → SiLU → SS2D → LN
+        x_feat = x_feat.permute(0, 3, 1, 2).contiguous()  # (B, d_inner, H, W)
+        x_feat = self.act(self.conv2d(x_feat))  # DWConv + SiLU
+        
+        # SS2D (4-way scan)
+        y = self.forward_core(x_feat)  # (B, H, W, d_inner)
+        y = self.out_norm(y)  # LayerNorm
+        
+        # 3. Branch 2: Gating
+        # 4. Merge: y * SiLU(z)
+        y = y * F.silu(z)
+        
+        # 5. Output projection
+        out = self.out_proj(y)  # (B, H, W, C)
+        out = self.dropout(out)
+        
+        return out
+
+
+class VSSBlock(nn.Module):
+    """VSS Block - MambaU-Lite style.
+    
+    Architecture (matching the diagram):
+        Input X (B, C, H, W)
+            ↓
+        LN (LayerNorm)
+            ↓
+        SS2D Module (contains: Linear→Split→DW→SiLU→Scan→LN→×Gate→Linear)
+            ↓
+        Residual: Y = X + SS2D(LN(X))
+            ↓
+        Output Y
+    
+    Args:
+        d_model: Model dimension (channels)
+        d_state: SSM state dimension (default: 16)
+        d_conv: Local convolution width (default: 3)
+        expand: Expansion factor (default: 2)
+        drop_path: Drop path rate (default: 0.0)
+    """
+    
+    def __init__(
+        self,
+        d_model: int,
+        d_state: int = 8,       # Few-shot optimized
+        d_conv: int = 3,
+        expand: int = 1,        # Few-shot optimized
+        drop_path: float = 0.1, # Regularization for few-shot
+        **kwargs
+    ):
+        super().__init__()
+        
+        self.d_model = d_model
+        
+        # Pre-normalization
+        self.ln_1 = nn.LayerNorm(d_model)
+        
+        # SS2D with gating (contains the full VSS architecture)
+        self.self_attention = SS2D(
+            d_model=d_model,
+            d_state=d_state,
+            d_conv=d_conv,
+            expand=expand,
+            **kwargs
+        )
+        
+        # Drop path for regularization
+        from timm.models.layers import DropPath
+        self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -436,47 +614,18 @@ class VSSBlock(nn.Module):
             x: (B, C, H, W) input features
             
         Returns:
-            y: (B, C, H, W) output features (same resolution)
+            y: (B, C, H, W) output features
         """
         B, C, H, W = x.shape
-        L = H * W
         
-        # Flatten: (B, C, H, W) -> (B, H, W, C) -> (B, L, C)
-        x_flat = x.permute(0, 2, 3, 1).reshape(B, L, C)
+        # Reshape: (B, C, H, W) -> (B, H, W, C)
+        x_hwc = x.permute(0, 2, 3, 1).contiguous()
         
-        # =============================================
-        # Pre-LN → SS2D Block → Residual
-        # =============================================
+        # Residual: Y = X + DropPath(SS2D(LN(X)))
+        y = x_hwc + self.drop_path(self.self_attention(self.ln_1(x_hwc)))
         
-        # Pre-Normalization: X1 = LN(X)
-        x1 = self.norm1(x_flat)
-        
-        # SS2D Block:
-        # 1. Linear projection (no expansion: C → C)
-        h = self.in_proj(x1)  # (B, L, d_inner)
-        
-        # 2. DWConv (need spatial reshape)
-        h_2d = h.reshape(B, H, W, self.d_inner).permute(0, 3, 1, 2)  # (B, d_inner, H, W)
-        h_2d = self.dw_conv(h_2d)
-        h = h_2d.permute(0, 2, 3, 1).reshape(B, L, self.d_inner)  # (B, L, d_inner)
-        
-        # 3. SiLU activation
-        h = F.silu(h)
-        
-        # 4. SS2D (4-way scan)
-        h = self._ss2d_forward(h, H, W)
-        
-        # 5. LayerNorm
-        h = self.norm_ss2d(h)
-        
-        # 6. Linear projection back
-        h = self.out_proj(h)  # (B, L, C)
-        
-        # Residual: Y = X + SS2D_Block(X1)
-        y = x_flat + h
-        
-        # Reshape back: (B, L, C) -> (B, C, H, W)
-        y = y.reshape(B, H, W, C).permute(0, 3, 1, 2)
+        # Reshape back: (B, H, W, C) -> (B, C, H, W)
+        y = y.permute(0, 3, 1, 2).contiguous()
         
         return y
 
@@ -514,7 +663,7 @@ class DualBranchFusion(nn.Module):
     def __init__(
         self,
         channels: int,
-        d_state: int = 4,
+        d_state: int = 8,  # Few-shot optimized
         dilation: int = 2,
         mode: str = 'both'
     ):
@@ -529,12 +678,13 @@ class DualBranchFusion(nn.Module):
         else:
             self.local_branch = None
         
-        # Branch 2: Lightweight VSS Block (optimized for few-shot)
+        # Branch 2: MambaU-Lite style VSS Block
         if mode in ['both', 'global_only']:
             self.global_branch = VSSBlock(
                 d_model=channels,
-                d_state=d_state,
-                d_conv=3  # Smaller kernel for short sequences
+                d_state=d_state,  # Default 16 from function param
+                d_conv=3,
+                expand=1  # Few-shot optimized (was 2)
             )
         else:
             self.global_branch = None
