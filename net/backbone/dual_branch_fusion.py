@@ -208,13 +208,6 @@ class LocalAGLKABranch(nn.Module):
             groups=channels, bias=False
         )
         
-        # Dilation 3: Effective RF = 13, captures larger context
-        self.lk_conv5_d3 = nn.Conv2d(
-            channels, channels, kernel_size=5,
-            padding=6, dilation=3,
-            groups=channels, bias=False
-        )
-        
         # === Asymmetric Branches for Scalogram ===
         # DWConv(1×7) for temporal/time-axis awareness (horizontal)
         self.asym_temporal = nn.Conv2d(
@@ -263,9 +256,9 @@ class LocalAGLKABranch(nn.Module):
         # === Local Stem ===
         x2 = self.local_stem(x1)  # DWConv3x3 + SiLU
         
-        # === Multi-scale 5×5 Branch ===
+        # === Multi-scale 5×5 Branch (2 scales: d1 + d2) ===
         # Sum → LN → SiLU
-        x_ms = self.lk_conv5_d1(x2) + self.lk_conv5_d2(x2) + self.lk_conv5_d3(x2)
+        x_ms = self.lk_conv5_d1(x2) + self.lk_conv5_d2(x2)
         x_ms = x_ms.permute(0, 2, 3, 1)  # (B, H, W, C)
         x_ms = self.ms_norm(x_ms)
         x_ms = x_ms.permute(0, 3, 1, 2)  # (B, C, H, W)

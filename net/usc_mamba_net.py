@@ -122,37 +122,24 @@ class USCMambaNet(nn.Module):
         self.use_cross_attention = use_cross_attention
         
         # ============================================================
-        # STAGE 1: Patch Embedding
+        # STAGES 1-2: Lightweight Conv Stem (2 blocks)
+        # Input: (B, 3, 128, 128) → Output: (B, 64, 32, 32)
+        # Preserves spatial resolution for Mamba/LKA
         # ============================================================
-        self.patch_embed = PatchEmbed2D(
-            in_channels=in_channels,
-            embed_dim=base_dim,
-            kernel_size=3,
-            norm_layer=nn.LayerNorm
+        def conv_block(in_ch, out_ch):
+            """Standard conv block: Conv → BN → SiLU → MaxPool"""
+            return nn.Sequential(
+                nn.Conv2d(in_ch, out_ch, kernel_size=3, stride=1, padding=1, bias=False),
+                nn.BatchNorm2d(out_ch),
+                nn.SiLU(inplace=True),
+                nn.MaxPool2d(kernel_size=2, stride=2)  # /2
+            )
+        
+        self.backbone = nn.Sequential(
+            conv_block(in_channels, hidden_dim),      # 3 → 64, 128 → 64
+            conv_block(hidden_dim, hidden_dim),       # 64 → 64, 64 → 32
         )
-        
-        # ============================================================
-        # STAGE 2: ConvBlocks (preserve spatial, increase channels)
-        # (B, 32, 128, 128) → (B, 64, 128, 128)
-        # ============================================================
-        self.conv_blocks = nn.Sequential(
-            ConvBlock(base_dim, base_dim * 2),      # 32 → 64
-            ConvBlock(base_dim * 2, base_dim * 2),  # 64 → 64
-        )
-        
-        # ============================================================
-        # STAGE 3: Single PatchMerging (spatial /2, channels ×2)
-        # (B, 64, 128, 128) → (B, 128, 64, 64)
-        # ============================================================
-        self.patch_merge = PatchMerging2D(dim=base_dim * 2, norm_layer=nn.LayerNorm)
-        
-        final_merge_dim = base_dim * 4  # 128
-        
-        # ============================================================
-        # STAGE 4: Channel Projection (lightweight)
-        # ============================================================
-        self.channel_proj_conv = nn.Conv2d(final_merge_dim, hidden_dim, kernel_size=1, bias=False)
-        self.channel_proj_norm = nn.GroupNorm(num_groups=8, num_channels=hidden_dim)
+        # Final output: (B, 64, 32, 32) with 2 MaxPools (128 / 4 = 32)
         
         # ============================================================
         # STAGE 5: Feature Extraction (ADD-based) - ABLATION: dualpath_mode
@@ -209,20 +196,8 @@ class USCMambaNet(nn.Module):
         Returns:
             features: (B, hidden_dim, H', W') encoded features
         """
-        # Stage 1: Patch embedding (B, 3, 128, 128) → (B, 32, 128, 128)
-        f = self.patch_embed(x)
-        
-        # Stage 2: ConvBlocks (preserve spatial) (B, 32, 128, 128) → (B, 64, 128, 128)
-        f = self.conv_blocks(f)
-        
-        # Stage 3: Single PatchMerging (B, 64, 128, 128) → (B, 128, 64, 64)
-        f = self.patch_merge(f)
-        
-        # Stage 4: Channel projection (residual-friendly)
-        # Linear proj + GroupNorm, NO activation (reduce nonlinearity)
-        f_proj = self.channel_proj_conv(f)
-        f_proj = self.channel_proj_norm(f_proj)
-        f = f_proj
+        # Stages 1-2: Conv stem (B, 3, 128, 128) → (B, 64, 32, 32)
+        f = self.backbone(x)
         
         # Stage 5: Dual branch fusion (ADD-based) - conditional
         f = self.dual_branch(f)
