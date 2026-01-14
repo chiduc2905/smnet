@@ -11,6 +11,7 @@ def get_args():
                         default='/mnt/disk2/nhatnc/res/scalogram_fewshot/proposed_model/smnet/scalogram_official',
                         help='Path to dataset')
     parser.add_argument('--dataset_name', type=str, default='minh', help='Dataset name for logging')
+    parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility')
     return parser.parse_args()
 
 
@@ -30,7 +31,7 @@ QUERY_NUM = 5  # Synced with pd_fewshot for identical episodes
 MODELS = ['uscmamba']
 
 
-def run_experiment(model, shot, samples, dataset_path, dataset_name, project):
+def run_experiment(model, shot, samples, dataset_path, dataset_name, project, seed):
     """Run a single SMNet experiment."""
     print(f"\n{'='*60}")
     print(f"Model={model}, Shot={shot}, Samples={samples if samples else 'All'}")
@@ -51,10 +52,12 @@ def run_experiment(model, shot, samples, dataset_path, dataset_name, project):
         '--lr', '1e-3',
         '--eta_min', '1e-5',
         '--weight_decay', '1e-4',
-        '--margin_type', 'arcface',  # Enable ArcFace margin loss
+        '--margin_type', 'none',  # Disabled ArcFace for this experiment
+        '--use_unified_attention', 'false',  # Disabled Unified Attention (ablation)
         '--episode_num_train', '100',
         '--episode_num_val', '150',
         '--episode_num_test', '150',
+        '--seed', str(seed),  # Fixed seed for reproducibility
     ]
     
     if samples is not None:
@@ -105,7 +108,8 @@ def main():
                     samples=samples,
                     dataset_path=args.dataset_path,
                     dataset_name=args.dataset_name,
-                    project=args.project
+                    project=args.project,
+                    seed=args.seed
                 )
                 
                 if success:

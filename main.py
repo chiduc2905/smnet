@@ -70,6 +70,17 @@ def get_args():
     parser.add_argument('--image_size', type=int, default=128,
                         help='Input image size (default: 128)')
     
+    # Ablation control (for experiments from run_all_experiments.py)
+    parser.add_argument('--dualpath_mode', type=str, default='both',
+                        choices=['local_only', 'global_only', 'both'],
+                        help='DualPath mode: local_only, global_only, or both (default: both)')
+    parser.add_argument('--use_unified_attention', type=str, default='true',
+                        choices=['true', 'false'],
+                        help='Use Unified Spatial-Channel Attention (default: true)')
+    parser.add_argument('--use_cross_attention', type=str, default='true',
+                        choices=['true', 'false'],
+                        help='Use Prototype Cross-Attention (default: true)')
+    
     # Training
     parser.add_argument('--training_samples', type=int, default=None, 
                         help='Total training samples (e.g. 30=10/class)')
@@ -126,14 +137,27 @@ def get_model(args):
     """Initialize model based on args."""
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
+    # Convert string args to boolean for ablation flags
+    use_unified = args.use_unified_attention.lower() == 'true'
+    use_cross = args.use_cross_attention.lower() == 'true'
+    
     model = USCMambaNet(
         in_channels=3,  # RGB input
         hidden_dim=args.hidden_dim,
         temperature=args.temperature,
         delta_lambda=args.delta_lambda,
         use_projection=not args.no_projection,
+        dualpath_mode=args.dualpath_mode,
+        use_unified_attention=use_unified,
+        use_cross_attention=use_cross,
         device=str(device)
     )
+    
+    # Print ablation config
+    print(f"\nModel Config:")
+    print(f"  dualpath_mode: {args.dualpath_mode}")
+    print(f"  use_unified_attention: {use_unified}")
+    print(f"  use_cross_attention: {use_cross}")
     
     return model.to(device)
 
@@ -142,8 +166,13 @@ def get_model(args):
 # Training
 # =============================================================================
 
-def train_loop(net, train_loader, val_X, val_y, args):
-    """Train with CosineAnnealingLR + Warmup (per-iteration LR adjustment)."""
+def train_loop(net, train_X, train_y, val_X, val_y, args):
+    """Train with CosineAnnealingLR.
+    
+    Training episodes are DIFFERENT each epoch (seed = base_seed + epoch),
+    but reproducible across experiments with the same seed.
+    Validation uses FIXED seed for consistent evaluation.
+    """
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
     # Import margin losses
@@ -206,6 +235,16 @@ def train_loop(net, train_loader, val_X, val_y, args):
     best_acc = 0.0
     
     for epoch in range(1, args.num_epochs + 1):
+        # Create NEW training dataset each epoch with epoch-dependent seed
+        # This ensures: (1) different episodes each epoch, (2) reproducible across experiments
+        train_seed = args.seed + epoch  # Epoch 1 uses seed+1, Epoch 2 uses seed+2, etc.
+        train_ds = FewshotDataset(train_X, train_y, args.episode_num_train,
+                                  args.way_num, args.shot_num, args.query_num, train_seed)
+        train_gen = torch.Generator()
+        train_gen.manual_seed(train_seed)
+        train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
+                                  generator=train_gen)
+        
         net.train()
         total_loss = 0.0
         train_correct = 0
@@ -282,10 +321,11 @@ def train_loop(net, train_loader, val_X, val_y, args):
         # Training accuracy from same episodes (not re-sampled!)
         train_acc = train_correct / train_total if train_total > 0 else 0
 
-        
+        # Validation - use fixed seed (not epoch-dependent) for reproducibility
         val_ds = FewshotDataset(val_X, val_y, args.episode_num_val,
-                                args.way_num, args.shot_num, args.query_num, args.seed + epoch)
-        val_loader = DataLoader(val_ds, batch_size=1, shuffle=False)
+                                args.way_num, args.shot_num, args.query_num, args.seed)
+        val_loader = DataLoader(val_ds, batch_size=1, shuffle=False,
+                                 worker_init_fn=lambda w: seed_func(args.seed + w))
         
         val_acc, val_loss = evaluate(net, val_loader, args)
         avg_loss = total_loss / len(train_loader)
@@ -570,7 +610,10 @@ def main():
     
     wandb.init(project=args.project, config=config, name=run_name, group=f"uscmamba_{args.dataset_name}", job_type=args.mode)
     
+    # Set seed BEFORE anything else for full reproducibility
     seed_func(args.seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
     
     os.makedirs(args.path_weights, exist_ok=True)
     os.makedirs(args.path_results, exist_ok=True)
@@ -648,11 +691,8 @@ def main():
         train_y = torch.cat(y_list)
         print(f"Using {args.training_samples} training samples ({per_class}/class)")
     
-    # Create data loaders
-    # Training: use same query_num as val/test for reproducibility across projects
-    train_ds = FewshotDataset(train_X, train_y, args.episode_num_train,
-                              args.way_num, args.shot_num, args.query_num, args.seed)
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
+    # Note: Training dataset is created INSIDE train_loop with epoch-dependent seed
+    # This ensures different episodes each epoch but reproducible across experiments
     
     test_ds = FewshotDataset(test_X, test_y, args.episode_num_test,
                              args.way_num, args.shot_num, args.query_num, args.seed)
@@ -668,7 +708,7 @@ def main():
     wandb.log({"model/total_parameters": total_params, "model/trainable_parameters": trainable_params})
     
     if args.mode == 'train':
-        best_acc, history = train_loop(net, train_loader, val_X, val_y, args)
+        best_acc, history = train_loop(net, train_X, train_y, val_X, val_y, args)
         
         # Load best model for testing
         samples_suffix = f'{args.training_samples}samples' if args.training_samples else 'all'

@@ -57,6 +57,9 @@ class AblationConfig:
     
     # Image
     image_size: int = 128
+    
+    # Seed for reproducibility
+    seed: int = 42
 
 
 # =============================================================================
@@ -127,6 +130,7 @@ def run_single_experiment(
         '--episode_num_val', str(config.episode_num_val),
         '--episode_num_test', str(config.episode_num_test),
         '--training_samples', str(training_samples),
+        '--seed', str(config.seed),  # Fixed seed for reproducibility
     ]
     
     experiment_name = f"{ablation_type}_{mode}_{shot}shot_{training_samples}samples"
@@ -266,6 +270,9 @@ def get_args():
     parser.add_argument('--dry_run', action='store_true',
                         help='Print experiments without running')
     
+    parser.add_argument('--seed', type=int, default=42,
+                        help='Random seed for reproducibility')
+    
     return parser.parse_args()
 
 
@@ -284,6 +291,7 @@ def main():
         num_epochs=args.num_epochs,
         image_size=args.image_size,
         training_samples_list=training_samples,
+        seed=args.seed,  # Pass seed
     )
     
     print("\n" + "=" * 70)

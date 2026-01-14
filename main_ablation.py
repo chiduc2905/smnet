@@ -132,8 +132,13 @@ def get_model(args):
 # Training
 # =============================================================================
 
-def train_loop(net, train_loader, val_X, val_y, args):
-    """Train with CosineAnnealingLR."""
+def train_loop(net, train_X, train_y, val_X, val_y, args):
+    """Train with CosineAnnealingLR.
+    
+    Training episodes are DIFFERENT each epoch (seed = base_seed + epoch),
+    but reproducible across experiments with the same seed.
+    Validation uses FIXED seed for consistent evaluation.
+    """
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
     criterion_main = ContrastiveLoss().to(device)
@@ -162,6 +167,16 @@ def train_loop(net, train_loader, val_X, val_y, args):
     best_acc = 0.0
     
     for epoch in range(1, args.num_epochs + 1):
+        # Create NEW training dataset each epoch with epoch-dependent seed
+        # This ensures: (1) different episodes each epoch, (2) reproducible across experiments
+        train_seed = args.seed + epoch  # Epoch 1 uses seed+1, Epoch 2 uses seed+2, etc.
+        train_ds = FewshotDataset(train_X, train_y, args.episode_num_train,
+                                  args.way_num, args.shot_num, args.query_num, train_seed)
+        train_gen = torch.Generator()
+        train_gen.manual_seed(train_seed)
+        train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
+                                  generator=train_gen)
+        
         net.train()
         total_loss = 0.0
         train_correct = 0
@@ -211,9 +226,8 @@ def train_loop(net, train_loader, val_X, val_y, args):
         
         train_acc = train_correct / train_total if train_total > 0 else 0
         
-        # Validation
         val_ds = FewshotDataset(val_X, val_y, args.episode_num_val,
-                                args.way_num, args.shot_num, args.query_num, args.seed + epoch)
+                                args.way_num, args.shot_num, args.query_num, args.seed)
         val_loader = DataLoader(val_ds, batch_size=1, shuffle=False)
         
         val_acc, val_loss = evaluate(net, val_loader, args, criterion_main)
@@ -385,7 +399,10 @@ def main():
     wandb.init(project=args.project, config=config, name=run_name, 
                group=f"ablation_{args.ablation_type}", job_type="train")
     
+    # Set seed BEFORE anything else for full reproducibility
     seed_func(args.seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
     
     os.makedirs(args.path_weights, exist_ok=True)
     os.makedirs(args.path_results, exist_ok=True)
@@ -421,10 +438,8 @@ def main():
         train_y = torch.cat(y_list)
         print(f"Using {args.training_samples} training samples ({per_class}/class)")
     
-    # Create data loaders
-    train_ds = FewshotDataset(train_X, train_y, args.episode_num_train,
-                              args.way_num, args.shot_num, args.query_num, args.seed)
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
+    # Note: Training dataset is created INSIDE train_loop with epoch-dependent seed
+    # This ensures different episodes each epoch but reproducible across experiments
     
     test_ds = FewshotDataset(test_X, test_y, args.episode_num_test,
                              args.way_num, args.shot_num, args.query_num, args.seed)
@@ -438,7 +453,7 @@ def main():
     wandb.log({"model/total_parameters": total_params})
     
     # Train
-    best_acc, history = train_loop(net, train_loader, val_X, val_y, args)
+    best_acc, history = train_loop(net, train_X, train_y, val_X, val_y, args)
     
     # Load best and test
     samples_suffix = f'{args.training_samples}samples' if args.training_samples else 'all'
