@@ -70,7 +70,10 @@ def run_experiment(model, shot, samples, dataset_path, dataset_name, project, se
         '--num_epochs', '100',
         '--lr', '1e-3',
         '--eta_min', '1e-5',
-        '--weight_decay', '1e-4',
+        '--weight_decay', '5e-4',  # Increased from 1e-4 for better regularization
+        '--temperature', '12.0',  # Reduced from 16.0 for softer predictions
+        '--cross_attn_alpha', '0.05',  # Reduced from 0.1 to prevent overfitting
+        '--grad_clip', '0.5',  # Reduced from 1.0 for more stable training
         '--margin_type', 'none',  # Disabled ArcFace/CosFace for testing
         '--use_unified_attention', 'true',  # Full model with Unified Attention
         '--episode_num_train', '200',
