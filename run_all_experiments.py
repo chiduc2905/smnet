@@ -12,7 +12,26 @@ def get_args():
                         help='Path to dataset')
     parser.add_argument('--dataset_name', type=str, default='minh', help='Dataset name for logging')
     parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility')
+    parser.add_argument('--mode_id', type=int, default=None, choices=list(range(1, 9)),
+                        help='Run specific experiment (1-8). If not set, runs all experiments.')
     return parser.parse_args()
+
+
+# Experiment modes mapping: mode_id -> (samples, shot)
+# Mode 1: 30 samples, 1-shot    Mode 2: 30 samples, 5-shot
+# Mode 3: 60 samples, 1-shot    Mode 4: 60 samples, 5-shot
+# Mode 5: 150 samples, 1-shot   Mode 6: 150 samples, 5-shot
+# Mode 7: All samples, 1-shot   Mode 8: All samples, 5-shot
+EXPERIMENT_MODES = {
+    1: (30, 1),
+    2: (30, 5),
+    3: (60, 1),
+    4: (60, 5),
+    5: (150, 1),
+    6: (150, 5),
+    7: (None, 1),  # None = All samples
+    8: (None, 5),
+}
 
 
 # Configuration
@@ -74,54 +93,67 @@ def run_experiment(model, shot, samples, dataset_path, dataset_name, project, se
 def main():
     args = get_args()
     
-    # Count total experiments
-    total_experiments = len(MODELS) * len(SHOTS) * len(SAMPLES_LIST)
-    current = 0
-    
-    print("="*60)
-    print("USCMambaNet - Full Experiment Suite")
-    print("="*60)
-    print(f"Models: {MODELS}")
-    print(f"Shots: {SHOTS}")
-    print(f"Training samples: {SAMPLES_LIST}")
-    print(f"Dataset: {args.dataset_path} ({args.dataset_name})")
-    print(f"Total experiments: {total_experiments}")
-    print("="*60)
-    
     # Create directories
     os.makedirs('checkpoints', exist_ok=True)
     os.makedirs('results', exist_ok=True)
     
+    # Determine experiments to run
+    if args.mode_id is not None:
+        # Run single experiment based on mode_id
+        samples, shot = EXPERIMENT_MODES[args.mode_id]
+        experiments = [('uscmamba', samples, shot)]
+        print("=" * 60)
+        print(f"USCMambaNet - Single Experiment (Mode {args.mode_id})")
+        print("=" * 60)
+        print(f"  Samples: {samples if samples else 'All'}")
+        print(f"  Shot: {shot}")
+        print(f"  Dataset: {args.dataset_path}")
+        print("=" * 60)
+    else:
+        # Run all experiments
+        experiments = [
+            (model, samples, shot)
+            for model in MODELS
+            for samples in SAMPLES_LIST
+            for shot in SHOTS
+        ]
+        print("=" * 60)
+        print("USCMambaNet - Full Experiment Suite (All 8 modes)")
+        print("=" * 60)
+        print("Mode mapping:")
+        for mid, (s, sh) in EXPERIMENT_MODES.items():
+            print(f"  Mode {mid}: {s if s else 'All'} samples, {sh}-shot")
+        print(f"Dataset: {args.dataset_path} ({args.dataset_name})")
+        print(f"Total experiments: {len(experiments)}")
+        print("=" * 60)
+    
     success_count = 0
     failed_experiments = []
+    total = len(experiments)
     
-    # Run all experiments
-    for model in MODELS:
-        for shot in SHOTS:
-            for samples in SAMPLES_LIST:
-                current += 1
-                print(f"\n[{current}/{total_experiments}]", end=" ")
-                
-                success = run_experiment(
-                    model=model,
-                    shot=shot,
-                    samples=samples,
-                    dataset_path=args.dataset_path,
-                    dataset_name=args.dataset_name,
-                    project=args.project,
-                    seed=args.seed
-                )
-                
-                if success:
-                    success_count += 1
-                else:
-                    failed_experiments.append(f"{model}_{shot}shot_{samples}samples")
+    for i, (model, samples, shot) in enumerate(experiments, 1):
+        print(f"\n[{i}/{total}]", end=" ")
+        
+        success = run_experiment(
+            model=model,
+            shot=shot,
+            samples=samples,
+            dataset_path=args.dataset_path,
+            dataset_name=args.dataset_name,
+            project=args.project,
+            seed=args.seed
+        )
+        
+        if success:
+            success_count += 1
+        else:
+            failed_experiments.append(f"uscmamba_{shot}shot_{samples if samples else 'all'}samples")
     
     # Summary
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("EXPERIMENT SUMMARY")
-    print("="*60)
-    print(f"Total: {total_experiments}")
+    print("=" * 60)
+    print(f"Total: {total}")
     print(f"Success: {success_count}")
     print(f"Failed: {len(failed_experiments)}")
     
@@ -130,7 +162,7 @@ def main():
         for exp in failed_experiments:
             print(f"  - {exp}")
     
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("Generating comparison charts...")
     print("="*60)
     

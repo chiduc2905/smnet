@@ -605,7 +605,7 @@ class VSSBlock(nn.Module):
         )
         
         # Drop path for regularization
-        from timm.models.layers import DropPath
+        from timm.layers import DropPath
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:

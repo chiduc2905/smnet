@@ -74,6 +74,10 @@ def get_args():
     parser.add_argument('--weight_decay', type=float, default=1e-4)
     parser.add_argument('--grad_clip', type=float, default=1.0)
     parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--temperature', type=float, default=20.0,
+                        help='Cosine similarity temperature (same as main.py)')
+    parser.add_argument('--cross_attn_alpha', type=float, default=0.3,
+                        help='Prototype Cross-Attention residual weight (same as main.py)')
     
     # Loss weights
     parser.add_argument('--lambda_center', type=float, default=0.01,
@@ -122,6 +126,8 @@ def get_model(args):
     
     model = USCMambaNet(
         in_channels=3,
+        temperature=args.temperature,
+        cross_attn_alpha=args.cross_attn_alpha,
         **ablation_config
     )
     

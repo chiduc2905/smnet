@@ -93,8 +93,10 @@ def get_args():
     parser.add_argument('--min_lr', type=float, default=1e-5, help='Min LR for cosine')
     parser.add_argument('--start_lr', type=float, default=1e-5, help='Start LR for warmup')
     parser.add_argument('--warmup_iters', type=int, default=500, help='Warmup iterations')
-    parser.add_argument('--temperature', type=float, default=16.0,
-                        help='Cosine similarity temperature τ (recommended: 16-20)')
+    parser.add_argument('--temperature', type=float, default=20.0,
+                        help='Cosine similarity temperature τ (higher = sharper decision boundary)')
+    parser.add_argument('--cross_attn_alpha', type=float, default=0.3,
+                        help='Prototype Cross-Attention residual weight (0.1-0.5, higher = stronger query refinement)')
     parser.add_argument('--delta_lambda', type=float, default=0.25,
                         help='Weight for relation delta correction (recommended: 0.2-0.3)')
     parser.add_argument('--no_projection', action='store_true',
@@ -145,6 +147,7 @@ def get_model(args):
         in_channels=3,  # RGB input
         hidden_dim=args.hidden_dim,
         temperature=args.temperature,
+        cross_attn_alpha=args.cross_attn_alpha,
         delta_lambda=args.delta_lambda,
         use_projection=not args.no_projection,
         dualpath_mode=args.dualpath_mode,
