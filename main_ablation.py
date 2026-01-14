@@ -64,9 +64,9 @@ def get_args():
     
     # Training
     parser.add_argument('--training_samples', type=int, default=None)
-    parser.add_argument('--episode_num_train', type=int, default=100)
-    parser.add_argument('--episode_num_val', type=int, default=150)
-    parser.add_argument('--episode_num_test', type=int, default=150)
+    parser.add_argument('--episode_num_train', type=int, default=200)
+    parser.add_argument('--episode_num_val', type=int, default=300)
+    parser.add_argument('--episode_num_test', type=int, default=300)
     parser.add_argument('--num_epochs', type=int, default=100)
     parser.add_argument('--batch_size', type=int, default=1)
     parser.add_argument('--lr', type=float, default=1e-3, help='Base learning rate')
@@ -74,9 +74,9 @@ def get_args():
     parser.add_argument('--weight_decay', type=float, default=1e-4)
     parser.add_argument('--grad_clip', type=float, default=1.0)
     parser.add_argument('--seed', type=int, default=42)
-    parser.add_argument('--temperature', type=float, default=20.0,
+    parser.add_argument('--temperature', type=float, default=16.0,
                         help='Cosine similarity temperature (same as main.py)')
-    parser.add_argument('--cross_attn_alpha', type=float, default=0.3,
+    parser.add_argument('--cross_attn_alpha', type=float, default=0.1,
                         help='Prototype Cross-Attention residual weight (same as main.py)')
     
     # Loss weights

@@ -84,19 +84,19 @@ def get_args():
     # Training
     parser.add_argument('--training_samples', type=int, default=None, 
                         help='Total training samples (e.g. 30=10/class)')
-    parser.add_argument('--episode_num_train', type=int, default=100)
-    parser.add_argument('--episode_num_val', type=int, default=150)
-    parser.add_argument('--episode_num_test', type=int, default=150)
+    parser.add_argument('--episode_num_train', type=int, default=200)
+    parser.add_argument('--episode_num_val', type=int, default=300)
+    parser.add_argument('--episode_num_test', type=int, default=300)
     parser.add_argument('--num_epochs', type=int, default=100)
     parser.add_argument('--batch_size', type=int, default=1)
     parser.add_argument('--lr', type=float, default=1e-3, help='Base learning rate')
     parser.add_argument('--min_lr', type=float, default=1e-5, help='Min LR for cosine')
     parser.add_argument('--start_lr', type=float, default=1e-5, help='Start LR for warmup')
     parser.add_argument('--warmup_iters', type=int, default=500, help='Warmup iterations')
-    parser.add_argument('--temperature', type=float, default=20.0,
-                        help='Cosine similarity temperature τ (higher = sharper decision boundary)')
-    parser.add_argument('--cross_attn_alpha', type=float, default=0.3,
-                        help='Prototype Cross-Attention residual weight (0.1-0.5, higher = stronger query refinement)')
+    parser.add_argument('--temperature', type=float, default=16.0,
+                        help='Cosine similarity temperature τ (recommended: 16-20)')
+    parser.add_argument('--cross_attn_alpha', type=float, default=0.1,
+                        help='Prototype Cross-Attention residual weight (0.1-0.5)')
     parser.add_argument('--delta_lambda', type=float, default=0.25,
                         help='Weight for relation delta correction (recommended: 0.2-0.3)')
     parser.add_argument('--no_projection', action='store_true',
@@ -490,6 +490,10 @@ def test_final(net, loader, args):
     acc_worst = episode_accuracies.min()
     acc_best = episode_accuracies.max()
     
+    # 95% Confidence Interval: Mean ± 1.96 * (std / sqrt(n))
+    n_episodes = len(episode_accuracies)
+    acc_ci95 = 1.96 * acc_std / np.sqrt(n_episodes)
+    
     time_mean = episode_times.mean()
     time_std = episode_times.std()
     
@@ -505,9 +509,10 @@ def test_final(net, loader, args):
     print(f"\n{'='*60}")
     print("ACCURACY METRICS")
     print('='*60)
-    print(f"  Mean Accuracy : {acc_mean:.4f} ± {acc_std:.4f}")
-    print(f"  Worst-case    : {acc_worst:.4f}")
-    print(f"  Best-case     : {acc_best:.4f}")
+    print(f"  Mean Accuracy : {acc_mean*100:.2f} ± {acc_ci95*100:.2f}% (95% CI)")
+    print(f"  Std Deviation : {acc_std*100:.2f}%")
+    print(f"  Worst-case    : {acc_worst*100:.2f}%")
+    print(f"  Best-case     : {acc_best*100:.2f}%")
     print(f"  Precision     : {prec:.4f}")
     print(f"  Recall        : {rec:.4f}")
     print(f"  F1-Score      : {f1:.4f}")
@@ -518,6 +523,7 @@ def test_final(net, loader, args):
     wandb.log({
         "test_accuracy_mean": acc_mean,
         "test_accuracy_std": acc_std,
+        "test_accuracy_ci95": acc_ci95,
         "test_accuracy_worst": acc_worst,
         "test_accuracy_best": acc_best,
         "test_precision": prec,
@@ -527,7 +533,7 @@ def test_final(net, loader, args):
     })
     
     wandb.run.summary["test_accuracy_mean"] = acc_mean
-    wandb.run.summary["test_accuracy_std"] = acc_std
+    wandb.run.summary["test_accuracy_ci95"] = acc_ci95
     
     # Plots
     samples_str = f"_{args.training_samples}samples" if args.training_samples else "_allsamples"

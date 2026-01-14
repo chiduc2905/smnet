@@ -48,9 +48,9 @@ class AblationConfig:
     weight_decay: float = 1e-4
     
     # Episodes
-    episode_num_train: int = 100
-    episode_num_val: int = 150
-    episode_num_test: int = 150
+    episode_num_train: int = 200
+    episode_num_val: int = 300
+    episode_num_test: int = 300
     
     # WandB
     project: str = 'uscmamba-ablation'

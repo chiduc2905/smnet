@@ -73,9 +73,9 @@ def run_experiment(model, shot, samples, dataset_path, dataset_name, project, se
         '--weight_decay', '1e-4',
         '--margin_type', 'none',  # Disabled ArcFace/CosFace for testing
         '--use_unified_attention', 'true',  # Full model with Unified Attention
-        '--episode_num_train', '100',
-        '--episode_num_val', '150',
-        '--episode_num_test', '150',
+        '--episode_num_train', '200',
+        '--episode_num_val', '300',
+        '--episode_num_test', '300',
         '--seed', str(seed),  # Fixed seed for reproducibility
     ]
     
