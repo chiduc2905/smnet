@@ -359,14 +359,10 @@ def train_loop(net, train_X, train_y, val_X, val_y, args):
             "lr": optimizer.param_groups[0]['lr']
         })
         
-        # Save best
+        # Track best val for monitoring only (NOT for checkpoint selection)
         if val_acc > best_acc:
             best_acc = val_acc
-            samples_suffix = f'{args.training_samples}samples' if args.training_samples else 'all'
-            model_filename = f'{args.dataset_name}_{args.model}_{samples_suffix}_{args.shot_num}shot_best.pth'
-            path = os.path.join(args.path_weights, model_filename)
-            torch.save(net.state_dict(), path)
-            print(f'  → Best model saved ({val_acc:.4f})')
+            print(f'  → New best val: {val_acc:.4f}')
             wandb.run.summary["best_val_acc"] = best_acc
     
     # Plot training curves
@@ -377,6 +373,15 @@ def train_loop(net, train_X, train_y, val_X, val_y, args):
     
     if os.path.exists(f"{curves_path}_curves.png"):
         wandb.log({"training_curves": wandb.Image(f"{curves_path}_curves.png")})
+    
+    # Save FINAL epoch checkpoint (proper few-shot protocol)
+    # Val is for hyperparameter tuning ONLY, not checkpoint selection
+    samples_suffix = f'{args.training_samples}samples' if args.training_samples else 'all'
+    final_model_filename = f'{args.dataset_name}_{args.model}_{samples_suffix}_{args.shot_num}shot_final.pth'
+    final_path = os.path.join(args.path_weights, final_model_filename)
+    torch.save(net.state_dict(), final_path)
+    print(f'Final checkpoint saved: {final_path}')
+    wandb.run.summary["final_epoch"] = args.num_epochs
     
     return best_acc, history
 
@@ -724,9 +729,11 @@ def main():
     if args.mode == 'train':
         best_acc, history = train_loop(net, train_X, train_y, val_X, val_y, args)
         
-        # Load best model for testing
+        # Load FINAL checkpoint for testing (proper few-shot protocol)
+        # Val is for hyperparameter tuning, NOT checkpoint selection
         samples_suffix = f'{args.training_samples}samples' if args.training_samples else 'all'
-        path = os.path.join(args.path_weights, f'{args.dataset_name}_{args.model}_{samples_suffix}_{args.shot_num}shot_best.pth')
+        path = os.path.join(args.path_weights, f'{args.dataset_name}_{args.model}_{samples_suffix}_{args.shot_num}shot_final.pth')
+        print(f'Testing with FINAL checkpoint (epoch {args.num_epochs}): {path}')
         net.load_state_dict(torch.load(path))
         test_final(net, test_loader, args)
         
