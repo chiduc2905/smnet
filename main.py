@@ -172,9 +172,11 @@ def get_model(args):
 def train_loop(net, train_X, train_y, val_X, val_y, args):
     """Train with CosineAnnealingLR.
     
-    Training episodes are DIFFERENT each epoch (seed = base_seed + epoch),
-    but reproducible across experiments with the same seed.
-    Validation uses FIXED seed for consistent evaluation.
+    Both training and validation episodes use epoch-dependent seed (base_seed + epoch).
+    This ensures:
+    - Different episodes each epoch (no overfitting to fixed episodes)
+    - Reproducible across experiments with the same seed
+    - FAIR BENCHMARKING: At epoch N, mamba_glscnet and pd_fewshot see identical episodes
     """
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
@@ -324,11 +326,14 @@ def train_loop(net, train_X, train_y, val_X, val_y, args):
         # Training accuracy from same episodes (not re-sampled!)
         train_acc = train_correct / train_total if train_total > 0 else 0
 
-        # Validation - use fixed seed (not epoch-dependent) for reproducibility
+        # Validation - use epoch-dependent seed for FAIR BENCHMARKING across experiments
+        # Same seed formula as training ensures: at epoch N, both mamba_glscnet and pd_fewshot
+        # will evaluate on identical validation episodes for unbiased comparison
+        val_seed = args.seed + epoch  # Same formula as training seed
         val_ds = FewshotDataset(val_X, val_y, args.episode_num_val,
-                                args.way_num, args.shot_num, args.query_num, args.seed)
+                                args.way_num, args.shot_num, args.query_num, val_seed)
         val_loader = DataLoader(val_ds, batch_size=1, shuffle=False,
-                                 worker_init_fn=lambda w: seed_func(args.seed + w))
+                                 worker_init_fn=lambda w: seed_func(val_seed + w))
         
         val_acc, val_loss = evaluate(net, val_loader, args)
         avg_loss = total_loss / len(train_loader)
