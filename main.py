@@ -90,7 +90,7 @@ def get_args():
     parser.add_argument('--num_epochs', type=int, default=100)
 
     parser.add_argument('--batch_size', type=int, default=1)
-    parser.add_argument('--lr', type=float, default=1e-3, help='Base learning rate')
+    parser.add_argument('--lr', type=float, default=5e-4, help='Base learning rate')
     parser.add_argument('--min_lr', type=float, default=1e-5, help='Min LR for cosine')
     parser.add_argument('--start_lr', type=float, default=1e-5, help='Start LR for warmup')
     parser.add_argument('--warmup_iters', type=int, default=500, help='Warmup iterations')
@@ -102,11 +102,11 @@ def get_args():
                         help='Weight for relation delta correction (recommended: 0.2-0.3)')
     parser.add_argument('--no_projection', action='store_true',
                         help='Disable embedding projection in similarity head (for debugging)')
-    parser.add_argument('--grad_clip', type=float, default=1.0,
+    parser.add_argument('--grad_clip', type=float, default=2.0,
                         help='Gradient clipping max norm')
     parser.add_argument('--eta_min', type=float, default=1e-5,
                         help='Min LR for CosineAnnealingLR')
-    parser.add_argument('--weight_decay', type=float, default=1e-4,
+    parser.add_argument('--weight_decay', type=float, default=5e-4,
                         help='Weight decay for optimizer')
     parser.add_argument('--seed', type=int, default=42)
     
