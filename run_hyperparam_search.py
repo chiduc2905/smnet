@@ -189,11 +189,13 @@ def run_experiment(config, base_args):
         cmd.extend([f'--{key}', str(value)])
     
     try:
-        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
-        return True, result.stdout
+        # Don't capture output to avoid buffer overflows with large logs
+        # Let it stream to stdout so user sees progress (and knows it's not frozen)
+        subprocess.run(cmd, check=True) 
+        return True, ""
     except subprocess.CalledProcessError as e:
         print(f"Error: {e}")
-        return False, e.stderr
+        return False, str(e)
 
 
 def parse_results(base_args, config_id):
