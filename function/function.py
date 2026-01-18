@@ -464,11 +464,11 @@ def plot_tsne(features, labels, num_classes=3, save_path=None, class_names=None)
         ax.scatter(
             embedded[mask, 0], embedded[mask, 1],
             c=[color], 
-            s=50,  # Marker size
-            alpha=0.8,
-            marker='o',  # Circle marker only
-            edgecolors='white', 
-            linewidths=0.6,
+            s=35,              # Smaller markers for better density visualization
+            alpha=1.0,         # Opaque - overlaps create natural density (no transparency)
+            marker='o',
+            edgecolors='black',  # Black edges for definition
+            linewidths=0.5,
             label=class_name,
             zorder=3
         )
@@ -637,11 +637,11 @@ def plot_umap(features, labels, num_classes=3, save_path=None, class_names=None)
         ax.scatter(
             embedded[mask, 0], embedded[mask, 1],
             c=[color], 
-            s=50,
-            alpha=0.8,
-            marker='o',  # Circle marker only
-            edgecolors='white', 
-            linewidths=0.6,
+            s=35,              # Smaller markers for better density visualization
+            alpha=1.0,         # Opaque - overlaps create natural density (no transparency)
+            marker='o',
+            edgecolors='black',  # Black edges for definition
+            linewidths=0.5,
             label=class_name,
             zorder=3
         )
