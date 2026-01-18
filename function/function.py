@@ -420,15 +420,18 @@ def plot_tsne(features, labels, num_classes=3, save_path=None, class_names=None)
         perplexity=perp, 
         random_state=42, 
         init='pca',
-        learning_rate='auto',
-        max_iter=1000
+        learning_rate=250.0,           # Higher LR for faster convergence (default: 200)
+        max_iter=3000,                 # More iterations for better optimization (default: 1000)
+        early_exaggeration=24.0,       # Stronger initial clustering force (default: 12.0)
+        n_iter_without_progress=500,   # Prevent early stopping
+        metric='cosine'                # Cosine distance matches normalized features
     )
     embedded = tsne.fit_transform(features_pca)
     
-    # Rescale to [-55, 55] to fit in [-60, 60] with margin
+    # Rescale to [-48, 48] to fit in [-60, 60] with margin (tighter visual clustering)
     max_val = np.abs(embedded).max()
     if max_val > 0:
-        embedded = embedded / max_val * 55
+        embedded = embedded / max_val * 48
     
     # ================================================================
     # Figure Setup - Q1 Quality
@@ -590,18 +593,18 @@ def plot_umap(features, labels, num_classes=3, save_path=None, class_names=None)
     # min_dist: 0.0-0.5 (lower = tighter clusters)
     reducer = umap.UMAP(
         n_components=2,
-        n_neighbors=15,
-        min_dist=0.1,
+        n_neighbors=20,          # Increased for better global structure
+        min_dist=0.05,           # Reduced for tighter clusters (was 0.1)
         metric='cosine',
         random_state=42
     )
     embedded = reducer.fit_transform(features_scaled)
     print(f"  UMAP embedding complete")
     
-    # Rescale to [-55, 55] to fit in [-60, 60] with margin
+    # Rescale to [-48, 48] to fit in [-60, 60] with margin (tighter visual clustering)
     max_val = np.abs(embedded).max()
     if max_val > 0:
-        embedded = embedded / max_val * 55
+        embedded = embedded / max_val * 48
     
     # ================================================================
     # Figure Setup - Q1 Quality
