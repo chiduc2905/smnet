@@ -465,7 +465,7 @@ def plot_tsne(features, labels, num_classes=3, save_path=None, class_names=None)
             embedded[mask, 0], embedded[mask, 1],
             c=[color], 
             s=35,              # Small markers for density visualization
-            alpha=0.5,         # Semi-transparent - overlapping creates darker density
+            alpha=0.8,         # Mostly opaque - subtle density effect without looking washed out
             marker='o',
             label=class_name,
             zorder=3
@@ -636,7 +636,7 @@ def plot_umap(features, labels, num_classes=3, save_path=None, class_names=None)
             embedded[mask, 0], embedded[mask, 1],
             c=[color], 
             s=35,              # Small markers for density visualization
-            alpha=0.5,         # Semi-transparent - overlapping creates darker density
+            alpha=0.8,         # Mostly opaque - subtle density effect without looking washed out
             marker='o',
             label=class_name,
             zorder=3
