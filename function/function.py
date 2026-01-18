@@ -398,13 +398,23 @@ def plot_tsne(features, labels, num_classes=3, save_path=None, class_names=None)
     features_scaled = scaler.fit_transform(features)
     
     # 2. PCA pre-processing (reduces noise, speeds up t-SNE)
-    n_components = min(30, n, features.shape[1])
+    # Increased from 30 to 50 to preserve more discriminative features
+    n_components = min(50, n, features.shape[1])
     pca = PCA(n_components=n_components, random_state=42)
     features_pca = pca.fit_transform(features_scaled)
-    print(f"  PCA reduced to {n_components} dimensions")
+    explained_variance = pca.explained_variance_ratio_.sum()
+    print(f"  PCA reduced to {n_components} dimensions (explained variance: {explained_variance:.2%})")
     
     # 3. t-SNE with optimized parameters
-    perp = 20  # Fixed perplexity (optimal for 45-150 points in few-shot)
+    # Dynamic perplexity based on sample size (fixes clustering issues)
+    # Formula: perplexity = min(30, max(5, n_samples // 50))
+    # - Small datasets (< 250 samples): perp = 5
+    # - Medium datasets (250-1500 samples): perp scales linearly
+    # - Large datasets (> 1500 samples): perp = 30 (capped)
+    n_samples = len(features_pca)
+    perp = min(30, max(5, n_samples // 50))
+    print(f"  Using perplexity = {perp} for {n_samples} samples (dynamic scaling)")
+    
     tsne = TSNE(
         n_components=2, 
         perplexity=perp, 
