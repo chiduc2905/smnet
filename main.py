@@ -438,8 +438,13 @@ def calculate_p_value(acc, baseline, n):
     return 2 * norm.sf(abs(z))
 
 
-def test_final(net, loader, args):
-    """Final evaluation with detailed metrics."""
+def test_final(net, loader, args, test_X=None, test_y=None):
+    """Final evaluation with detailed metrics.
+    
+    Args:
+        test_X: Full test set for visualization (to avoid duplicate samples in t-SNE/UMAP)
+        test_y: Full test labels
+    """
     import time
     
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -452,10 +457,12 @@ def test_final(net, loader, args):
     
     net.eval()
     all_preds, all_targets = [], []
-    all_features = []       # Backbone features (encode + GAP + Normalize)
     episode_accuracies = []
     episode_times = []
     
+    # ====================================================================
+    # Accuracy metrics: Use episodes (this is correct for few-shot eval)
+    # ====================================================================
     with torch.no_grad():
         for query, q_labels, support, s_labels in tqdm(loader, desc='Testing'):
             start_time = time.perf_counter()
@@ -478,14 +485,6 @@ def test_final(net, loader, args):
             
             all_preds.extend(preds.cpu().numpy())
             all_targets.extend(targets.cpu().numpy())
-            
-            # Extract features for t-SNE - Use feature_backbone (Fixed embedding space)
-            q_flat = query.view(-1, C, H, W)
-            features = net.encode(q_flat)  # (NQ, hidden_dim, H', W')
-            feat_backbone = features.mean(dim=(2, 3))  # GAP: (NQ, hidden_dim)
-            feat_backbone = F.normalize(feat_backbone, p=2, dim=-1)  # L2 normalize
-            
-            all_features.append(feat_backbone.cpu().numpy())
     
     # Metrics
     all_preds = np.array(all_preds)
@@ -553,25 +552,64 @@ def test_final(net, loader, args):
     if os.path.exists(f"{cm_base}_2col.png"):
         wandb.log({"confusion_matrix": wandb.Image(f"{cm_base}_2col.png")})
     
-    # t-SNE Plots (Fixed embedding space: Backbone -> GAP -> Normalize)
-    if all_features:
-        features = np.vstack(all_features)
+    # ====================================================================
+    # t-SNE/UMAP: Use UNIQUE test samples (not episode duplicates!)
+    # ====================================================================
+    # Problem with old approach:
+    # - 300 episodes × 15 queries = 4500 samples
+    # - But test set only has 150 samples (50/class × 3)
+    # - Each sample appears ~30 times → creates artificial "lumps" in t-SNE
+    #
+    # Solution: Extract features from full test set once (150 unique samples)
+    # ====================================================================
+    
+    if test_X is not None and test_y is not None:
+        print(f"\n{'='*60}")
+        print(f"Extracting features for t-SNE/UMAP from UNIQUE test samples")
+        print(f"Test set size: {len(test_X)} samples ({len(test_X)//args.way_num}/class)")
+        print('='*60)
         
-        # 1. t-SNE
-        tsne_path = os.path.join(args.path_results, 
-                                     f"tsne_{args.dataset_name}_{args.model}_{samples_str.strip('_')}_{args.shot_num}shot")
-        plot_tsne(features, all_targets, args.way_num, tsne_path, class_names=args.class_names)
-        
-        if os.path.exists(f"{tsne_path}_tsne.png"):
-            wandb.log({"tsne_plot": wandb.Image(f"{tsne_path}_tsne.png")})
-
-        # 2. UMAP
-        umap_path = os.path.join(args.path_results, 
-                                 f"umap_{args.dataset_name}_{args.model}_{samples_str.strip('_')}_{args.shot_num}shot")
-        plot_umap(features, all_targets, args.way_num, umap_path, class_names=args.class_names)
-        
-        if os.path.exists(f"{umap_path}_umap.png"):
-            wandb.log({"umap_plot": wandb.Image(f"{umap_path}_umap.png")})
+        with torch.no_grad():
+            # Extract features from unique test samples
+            test_X_device = test_X.to(device)
+            test_y_np = test_y.cpu().numpy()
+            
+            # Batch processing for memory efficiency
+            batch_size = 32
+            all_features = []
+            
+            for i in range(0, len(test_X), batch_size):
+                batch_X = test_X_device[i:i+batch_size]
+                
+                # Extract backbone features (same as in episodes)
+                features = net.encode(batch_X)  # (N, hidden_dim, H', W')
+                feat_backbone = features.mean(dim=(2, 3))  # GAP: (N, hidden_dim)
+                feat_backbone = F.normalize(feat_backbone, p=2, dim=-1)  # L2 normalize
+                
+                all_features.append(feat_backbone.cpu().numpy())
+            
+            features = np.vstack(all_features)
+            
+            print(f"Extracted {len(features)} unique features (shape: {features.shape})")
+            
+            # 1. t-SNE
+            tsne_path = os.path.join(args.path_results, 
+                                         f"tsne_{args.dataset_name}_{args.model}_{samples_str.strip('_')}_{args.shot_num}shot")
+            plot_tsne(features, test_y_np, args.way_num, tsne_path, class_names=args.class_names)
+            
+            if os.path.exists(f"{tsne_path}_tsne.png"):
+                wandb.log({"tsne_plot": wandb.Image(f"{tsne_path}_tsne.png")})
+    
+            # 2. UMAP
+            umap_path = os.path.join(args.path_results, 
+                                     f"umap_{args.dataset_name}_{args.model}_{samples_str.strip('_')}_{args.shot_num}shot")
+            plot_umap(features, test_y_np, args.way_num, umap_path, class_names=args.class_names)
+            
+            if os.path.exists(f"{umap_path}_umap.png"):
+                wandb.log({"umap_plot": wandb.Image(f"{umap_path}_umap.png")})
+    else:
+        print("\n⚠️  Warning: test_X/test_y not provided, skipping t-SNE/UMAP (would have duplicates)")
+    
     
     # Save results to file
     txt_path = os.path.join(args.path_results, 
@@ -721,12 +759,12 @@ def main():
         path = os.path.join(args.path_weights, f'{args.dataset_name}_{args.model}_{samples_suffix}_{args.shot_num}shot_final.pth')
         print(f'Testing with BEST checkpoint: {path}')
         net.load_state_dict(torch.load(path))
-        test_final(net, test_loader, args)
+        test_final(net, test_loader, args, test_X=test_X, test_y=test_y)
         
     else:  # Test only
         if args.weights:
             net.load_state_dict(torch.load(args.weights))
-            test_final(net, test_loader, args)
+            test_final(net, test_loader, args, test_X=test_X, test_y=test_y)
         else:
             print("Error: Please specify --weights for test mode")
     
