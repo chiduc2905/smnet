@@ -56,8 +56,8 @@ ATTENTION_SEARCH = {
 
 # Temperature Parameters
 TEMPERATURE_SEARCH = {
-    'temperature': [8.0, 12.0, 16.0, 20.0],
-    'delta_lambda': [0.15, 0.25, 0.35],
+    'temperature': [12.0, 16.0, 20.0],
+    'delta_lambda': [0.25, 0.35, 0.45],
 }
 
 # Model Architecture Parameters
@@ -69,7 +69,7 @@ ARCHITECTURE_SEARCH = {
 # Optimizer / Regularization Parameters
 OPTIMIZER_SEARCH = {
     'weight_decay': [1e-4, 5e-4, 1e-3],  # L2 regularization
-    'grad_clip': [0.5, 1.0, 2.0],  # Gradient clipping
+    'grad_clip': [1.0, 2.0, 3.0],  # Gradient clipping
     'lr': [5e-4, 1e-3, 2e-3],  # Learning rate
 }
 
@@ -82,7 +82,7 @@ LOSS_WEIGHT_SEARCH = {
 # Regularization Search (focused)
 REGULARIZATION_SEARCH = {
     'weight_decay': [1e-4, 5e-4, 1e-3],
-    'grad_clip': [0.5, 1.0],
+    'grad_clip': [1.0, 2.0],
     'lambda_center': [0.0, 0.01, 0.05],
 }
 
@@ -177,7 +177,8 @@ def run_experiment(config, base_args):
         '--lr', '1e-3',
         '--eta_min', '1e-5',
         '--weight_decay', '5e-4',
-        '--grad_clip', '0.5',
+        '--grad_clip', '2.0',  # Synced with main.py default
+        '--delta_lambda', '0.35',  # Synced with main.py default
         '--episode_num_train', '200',
         '--episode_num_val', '300',
         '--episode_num_test', '600',  # More test episodes for stable CI
