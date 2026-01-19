@@ -90,16 +90,16 @@ def get_args():
     parser.add_argument('--num_epochs', type=int, default=100)
 
     parser.add_argument('--batch_size', type=int, default=1)
-    parser.add_argument('--lr', type=float, default=5e-4, help='Base learning rate')
+    parser.add_argument('--lr', type=float, default=1e-3, help='Base learning rate')
     parser.add_argument('--min_lr', type=float, default=1e-5, help='Min LR for cosine')
     parser.add_argument('--start_lr', type=float, default=1e-5, help='Start LR for warmup')
     parser.add_argument('--warmup_iters', type=int, default=500, help='Warmup iterations')
     parser.add_argument('--temperature', type=float, default=16.0,
                         help='Cosine similarity temperature τ (recommended: 16-20)')
-    parser.add_argument('--cross_attn_alpha', type=float, default=0.1,
+    parser.add_argument('--cross_attn_alpha', type=float, default=0.3,
                         help='Prototype Cross-Attention residual weight (0.1-0.5)')
-    parser.add_argument('--delta_lambda', type=float, default=0.25,
-                        help='Weight for relation delta correction (recommended: 0.2-0.3)')
+    parser.add_argument('--delta_lambda', type=float, default=0.35,
+                        help='Weight for relation delta correction (recommended: 0.3-0.4)')
     parser.add_argument('--no_projection', action='store_true',
                         help='Disable embedding projection in similarity head (for debugging)')
     parser.add_argument('--grad_clip', type=float, default=2.0,
