@@ -178,6 +178,8 @@ def run_experiment(config, base_args):
         '--eta_min', '1e-5',
         '--weight_decay', '5e-4',
         '--grad_clip', '2.0',  # Synced with main.py default
+        '--temperature', '16.0',  # Synced with main.py default
+        '--cross_attn_alpha', '0.3',  # Synced with main.py default
         '--delta_lambda', '0.35',  # Synced with main.py default
         '--episode_num_train', '200',
         '--episode_num_val', '300',

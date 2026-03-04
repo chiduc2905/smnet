@@ -7,6 +7,7 @@ docs/
 
 # Nested git repositories
 few_shot_mamba/
+19-emerging-techniques/
 
 # Data folders (scalogram images)
 scalogram/
