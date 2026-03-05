@@ -1,11 +1,10 @@
-"""USCMambaNet Ablation Training Script.
+"""USCMambaNet Ablation Training Script (architecture-focused, CE-only).
 
-Trains USCMambaNet with specific components enabled/disabled for ablation studies:
-    - dualpath: local_only, global_only, or both
-    - unified_attention: with or without
-    - cross_attention: with or without
-
-NOTE: ArcFace/CosFace is NOT used in ablation experiments.
+Supported ablation groups:
+    - dualpath: local_only / global_only / both
+    - global_context: without_ms / with_ms
+    - attention_stack: none / unified_only / late_only / both
+    - prototype: no_cross / cross_no_axis / cross_axis
 
 Results are saved to results/ folder in format:
     results_{dataset}_{ablation_type}_{mode}_{samples}samples_{shot}shot.txt
@@ -14,7 +13,6 @@ import os
 import argparse
 import numpy as np
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.optim import lr_scheduler
@@ -26,8 +24,7 @@ import wandb
 from dataset import load_dataset
 from dataloader.dataloader import FewshotDataset
 from function.function import (
-    ContrastiveLoss, CenterLoss, seed_func,
-    plot_confusion_matrix, plot_tsne, plot_training_curves
+    seed_func,
 )
 
 # Model
@@ -44,17 +41,17 @@ def get_args():
     
     # Paths
     parser.add_argument('--dataset_path', type=str, 
-                        default='/mnt/disk2/nhatnc/res/scalogram_fewshot/proposed_model/smnet/scalogram_27_1')
+                        default='/mnt/disk2/nhatnc/res/scalogram_fewshot/proposed_model/smnet/scalogram_knee_augmented_split')
     parser.add_argument('--path_weights', type=str, default='checkpoints/')
     parser.add_argument('--path_results', type=str, default='results/')
     parser.add_argument('--dataset_name', type=str, default='knee_aug_split')
     
     # Ablation settings
     parser.add_argument('--ablation_type', type=str, required=True,
-                        choices=['dualpath', 'unified_attention', 'cross_attention'],
+                        choices=['dualpath', 'global_context', 'attention_stack', 'prototype'],
                         help='Type of ablation study')
     parser.add_argument('--ablation_mode', type=str, required=True,
-                        help='Mode: dualpath=(local_only|global_only|both), others=(with|without)')
+                        help='Mode depends on type (see run_ablation.py)')
     
     # Few-shot settings
     parser.add_argument('--way_num', type=int, default=4)
@@ -82,17 +79,30 @@ def get_args():
     parser.add_argument('--batch_size', type=int, default=1)
     parser.add_argument('--lr', type=float, default=1e-3, help='Base learning rate')
     parser.add_argument('--eta_min', type=float, default=1e-5, help='Min LR for cosine')
-    parser.add_argument('--weight_decay', type=float, default=1e-4)
-    parser.add_argument('--grad_clip', type=float, default=1.0)
+    parser.add_argument('--weight_decay', type=float, default=5e-4)
+    parser.add_argument('--grad_clip', type=float, default=2.0)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--temperature', type=float, default=16.0,
                         help='Cosine similarity temperature (same as main.py)')
-    parser.add_argument('--cross_attn_alpha', type=float, default=0.1,
+    parser.add_argument('--beta_maha', type=float, default=0.25,
+                        help='UAPS variance-aware penalty weight')
+    parser.add_argument('--uaps_eps', type=float, default=1e-4,
+                        help='UAPS epsilon')
+    parser.add_argument('--cross_attn_alpha', type=float, default=0.3,
                         help='Prototype Cross-Attention residual weight (same as main.py)')
-    
-    # Loss weights
-    parser.add_argument('--lambda_center', type=float, default=0.01,
-                        help='Weight for center loss')
+    parser.add_argument('--ms_downsample', type=int, default=2,
+                        help='Downsample ratio for multi-scale global branch')
+    parser.add_argument('--atrous_rate', type=int, default=2,
+                        help='Dilation for atrous branch')
+    parser.add_argument('--late_attn_window', type=int, default=4,
+                        help='Window size for late attention bridge')
+    parser.add_argument('--late_attn_dropout', type=float, default=0.0,
+                        help='Dropout for late attention bridge')
+    parser.add_argument('--axis_proto_pool', type=str, default='mean',
+                        choices=['mean', 'max'],
+                        help='Pooling for axis prototype tokens')
+    parser.add_argument('--axis_proto_mix_init', type=str, default='1.0,0.5,0.5',
+                        help='Initial mix logits [full,time,freq] for axis proto')
     
     # WandB
     parser.add_argument('--project', type=str, default='uscmamba-ablation')
@@ -105,20 +115,60 @@ def get_ablation_config(ablation_type: str, ablation_mode: str) -> dict:
     
     Returns a dict of flags to pass to USCMambaNet.
     """
-    # Default: everything enabled with full dualpath
+    # Default full model (architecture-only, no pair expert)
     config = {
         'dualpath_mode': 'both',
+        'use_ms_global': True,
         'use_unified_attention': True,
+        'use_late_attention': True,
         'use_cross_attention': True,
+        'use_axis_proto': True,
+        'use_pair_expert': False,
     }
     
     if ablation_type == 'dualpath':
-        # dualpath modes: local_only, global_only, both
+        if ablation_mode not in {'local_only', 'global_only', 'both'}:
+            raise ValueError("dualpath mode must be one of: local_only, global_only, both")
         config['dualpath_mode'] = ablation_mode
-    elif ablation_type == 'unified_attention':
-        config['use_unified_attention'] = (ablation_mode == 'with')
-    elif ablation_type == 'cross_attention':
-        config['use_cross_attention'] = (ablation_mode == 'with')
+    elif ablation_type == 'global_context':
+        if ablation_mode == 'without_ms':
+            config['use_ms_global'] = False
+        elif ablation_mode == 'with_ms':
+            config['use_ms_global'] = True
+        else:
+            raise ValueError("global_context mode must be: without_ms, with_ms")
+    elif ablation_type == 'attention_stack':
+        if ablation_mode == 'none':
+            config['use_unified_attention'] = False
+            config['use_late_attention'] = False
+        elif ablation_mode == 'unified_only':
+            config['use_unified_attention'] = True
+            config['use_late_attention'] = False
+        elif ablation_mode == 'late_only':
+            config['use_unified_attention'] = False
+            config['use_late_attention'] = True
+        elif ablation_mode == 'both':
+            config['use_unified_attention'] = True
+            config['use_late_attention'] = True
+        else:
+            raise ValueError("attention_stack mode must be: none, unified_only, late_only, both")
+    elif ablation_type == 'prototype':
+        if ablation_mode == 'no_cross':
+            config['use_cross_attention'] = False
+            config['use_axis_proto'] = False
+        elif ablation_mode == 'cross_no_axis':
+            config['use_cross_attention'] = True
+            config['use_axis_proto'] = False
+        elif ablation_mode == 'cross_axis':
+            config['use_cross_attention'] = True
+            config['use_axis_proto'] = True
+        else:
+            raise ValueError("prototype mode must be: no_cross, cross_no_axis, cross_axis")
+    else:
+        raise ValueError(f"Unsupported ablation type: {ablation_type}")
+
+    if not config['use_cross_attention']:
+        config['use_axis_proto'] = False
     
     return config
 
@@ -129,22 +179,39 @@ def get_model(args):
     
     # Get ablation-specific configuration
     ablation_config = get_ablation_config(args.ablation_type, args.ablation_mode)
+
+    axis_mix_parts = [p.strip() for p in args.axis_proto_mix_init.split(',')]
+    if len(axis_mix_parts) != 3:
+        raise ValueError("--axis_proto_mix_init must have exactly 3 comma-separated values")
+    axis_proto_mix_init = tuple(float(v) for v in axis_mix_parts)
     
     print(f"\nAblation Config: {args.ablation_type} = {args.ablation_mode}")
     print(f"  dualpath_mode: {ablation_config['dualpath_mode']}")
+    print(f"  use_ms_global: {ablation_config['use_ms_global']} (downsample={args.ms_downsample}, atrous={args.atrous_rate})")
     print(f"  use_unified_attention: {ablation_config['use_unified_attention']}")
+    print(f"  use_late_attention: {ablation_config['use_late_attention']} (window={args.late_attn_window})")
     print(f"  use_cross_attention: {ablation_config['use_cross_attention']}")
+    print(f"  use_axis_proto: {ablation_config['use_axis_proto']} ({args.axis_proto_pool}, mix={axis_proto_mix_init})")
     
     model = USCMambaNet(
         in_channels=3,
+        way_num=args.way_num,
         hidden_dim=args.hidden_dim,
         d_state=args.d_state,
         global_expand=args.global_expand,
         temperature=args.temperature,
+        beta_maha=args.beta_maha,
+        uaps_eps=args.uaps_eps,
         cross_attn_alpha=args.cross_attn_alpha,
         proto_pool_size=args.proto_pool_size,
         num_prototypes=args.num_prototypes,
         detach_prototypes=args.detach_prototypes,
+        ms_downsample=args.ms_downsample,
+        atrous_rate=args.atrous_rate,
+        late_attn_window=args.late_attn_window,
+        late_attn_dropout=args.late_attn_dropout,
+        axis_proto_pool=args.axis_proto_pool,
+        axis_proto_mix_init=axis_proto_mix_init,
         similarity_proj_dim=args.similarity_proj_dim,
         **ablation_config
     )
@@ -157,28 +224,14 @@ def get_model(args):
 # =============================================================================
 
 def train_loop(net, train_X, train_y, val_X, val_y, args):
-    """Train with CosineAnnealingLR.
-    
-    Training episodes are DIFFERENT each epoch (seed = base_seed + epoch),
-    but reproducible across experiments with the same seed.
-    Validation uses FIXED seed for consistent evaluation.
-    """
+    """Train with CE-only objective under episodic protocol."""
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    
-    criterion_main = ContrastiveLoss().to(device)
-    
-    # Get feature dimension from model
-    with torch.no_grad():
-        dummy_input = torch.randn(1, 3, args.image_size, args.image_size).to(device)
-        dummy_feat = net.extract_features(dummy_input)
-        feat_dim = dummy_feat.shape[-1]
-        
-    criterion_center = CenterLoss(num_classes=args.way_num, feat_dim=feat_dim, device=device)
-    
-    optimizer = optim.AdamW([
-        {'params': net.parameters()},
-        {'params': criterion_center.parameters()}
-    ], lr=args.lr, weight_decay=args.weight_decay)
+
+    optimizer = optim.AdamW(
+        net.parameters(),
+        lr=args.lr,
+        weight_decay=args.weight_decay,
+    )
     
     # Cosine Annealing Scheduler
     scheduler = lr_scheduler.CosineAnnealingLR(
@@ -191,9 +244,7 @@ def train_loop(net, train_X, train_y, val_X, val_y, args):
     best_acc = 0.0
     
     for epoch in range(1, args.num_epochs + 1):
-        # Create NEW training dataset each epoch with epoch-dependent seed
-        # This ensures: (1) different episodes each epoch, (2) reproducible across experiments
-        train_seed = args.seed + epoch  # Epoch 1 uses seed+1, Epoch 2 uses seed+2, etc.
+        train_seed = args.seed + epoch
         train_ds = FewshotDataset(train_X, train_y, args.episode_num_train,
                                   args.way_num, args.shot_num, args.query_num_train, train_seed)
         train_gen = torch.Generator()
@@ -223,18 +274,8 @@ def train_loop(net, train_X, train_y, val_X, val_y, args):
                 preds = scores.argmax(dim=1)
                 train_correct += (preds == targets).sum().item()
                 train_total += targets.size(0)
-            
-            # Main loss (CE/Contrastive)
-            loss_main = criterion_main(scores, targets)
-            
-            # Center loss (small regularization)
-            query_flat = query.view(-1, C, H, W)
-            query_features = net.extract_features(query_flat)
-            if query_features.dim() == 3:
-                query_features = query_features.mean(dim=1)
-            loss_center = criterion_center(query_features, targets.repeat(B) if B > 1 else targets)
-            
-            loss = loss_main + args.lambda_center * loss_center
+
+            loss = F.cross_entropy(scores, targets)
             loss.backward()
             
             if args.grad_clip > 0:
@@ -245,16 +286,15 @@ def train_loop(net, train_X, train_y, val_X, val_y, args):
             current_lr = optimizer.param_groups[0]['lr']
             pbar.set_postfix(loss=f'{loss.item():.4f}', lr=f'{current_lr:.2e}')
         
-        # Step scheduler
         scheduler.step()
         
         train_acc = train_correct / train_total if train_total > 0 else 0
-        
+        val_seed = args.seed + epoch
         val_ds = FewshotDataset(val_X, val_y, args.episode_num_val,
-                                args.way_num, args.shot_num, args.query_num_val, args.seed)
+                                args.way_num, args.shot_num, args.query_num_val, val_seed)
         val_loader = DataLoader(val_ds, batch_size=1, shuffle=False)
         
-        val_acc, val_loss = evaluate(net, val_loader, args, criterion_main)
+        val_acc, val_loss = evaluate(net, val_loader, args)
         avg_loss = total_loss / len(train_loader)
         
         history['train_acc'].append(train_acc)
@@ -267,11 +307,11 @@ def train_loop(net, train_X, train_y, val_X, val_y, args):
         wandb.log({
             "epoch": epoch,
             "loss/train": avg_loss,
-            "loss/val": val_loss,
-            "accuracy/train": train_acc,
-            "accuracy/val": val_acc,
-            "lr": optimizer.param_groups[0]['lr']
-        })
+                "loss/val": val_loss if val_loss is not None else 0.0,
+                "accuracy/train": train_acc,
+                "accuracy/val": val_acc,
+                "lr": optimizer.param_groups[0]['lr']
+            })
         
         if val_acc > best_acc:
             best_acc = val_acc
@@ -286,7 +326,7 @@ def train_loop(net, train_X, train_y, val_X, val_y, args):
     return best_acc, history
 
 
-def evaluate(net, loader, args, criterion_main=None):
+def evaluate(net, loader, args):
     """Compute accuracy and loss."""
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     net.eval()
@@ -309,11 +349,10 @@ def evaluate(net, loader, args, criterion_main=None):
             
             correct += (preds == targets).sum().item()
             total += targets.size(0)
-            
-            if criterion_main is not None:
-                loss = criterion_main(scores, targets)
-                total_loss += loss.item()
-                num_batches += 1
+
+            loss = F.cross_entropy(scores, targets)
+            total_loss += loss.item()
+            num_batches += 1
     
     acc = correct / total if total > 0 else 0
     avg_loss = total_loss / num_batches if num_batches > 0 else None
@@ -418,7 +457,7 @@ def main():
     print('='*60)
     print(f"Config: {args.shot_num}-shot | {args.num_epochs} epochs | Device: {args.device}")
     print(f"Training samples: {args.training_samples}")
-    print(f"NOTE: ArcFace/CosFace is DISABLED for ablation experiments")
+    print("NOTE: CE-only objective (no center/margin/pair/hard-mining)")
     
     # Initialize WandB
     samples_str = f"{args.training_samples}samples" if args.training_samples else "all"

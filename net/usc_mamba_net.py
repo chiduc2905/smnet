@@ -2,12 +2,11 @@
 
 Implements a clean few-shot learning architecture following ADD-vs-MULTIPLY design:
 - ADD: Feature extraction (encoder, dual-branch fusion, channel mixing)
-- MUL: Feature selection (unified attention ONLY)
-- Prototype Cross-Attention: Query refinement before GAP
+- MUL: Feature selection (late attention bridge ONLY by default)
 - Similarity: Cosine Similarity with Bottleneck
 
-Pipeline after Stage 6 (UnifiedAttention):
-    Features → PrototypeCrossAttention → GAP → CosineSimilarityHead → Final Scores
+Pipeline:
+    Features → GAP → CosineSimilarityHead → Final Scores
     
 CosineSimilarityHead:
     - Bottleneck (Linear → LayerNorm)
@@ -17,7 +16,6 @@ CosineSimilarityHead:
 Ablation Flags:
     - dualpath_mode: 'both', 'local_only', 'global_only', or 'none'
     - use_unified_attention: Enable/disable unified multi-scale attention
-    - use_cross_attention: Enable/disable prototype cross-attention
 """
 import torch
 import torch.nn as nn
@@ -28,25 +26,30 @@ from net.backbone.dual_branch_fusion import DualBranchFusion
 from net.backbone.late_attention_bridge import LateSingleHeadAttentionBridge
 from net.backbone.unified_attention import UnifiedSpatialChannelAttention
 from net.metrics.hybrid_similarity_head import CosineSimilarityHead
-from net.metrics.prototype_cross_attention import PrototypeCrossAttention
 from net.metrics.pair_expert_head import PairExpertCorrectionHead
 
 
-class ConvBlock(nn.Module):
-    """Conv3×3 block with residual: Y = Proj(X) + GELU(BN(Conv(X))).
-    
-    Used to replace first PatchMerging to preserve spatial resolution.
-    """
+class ConvStem64(nn.Module):
+    """Legacy conv stem (same structure as old stem logic)."""
+
     def __init__(self, in_ch: int, out_ch: int):
         super().__init__()
-        self.conv = nn.Conv2d(in_ch, out_ch, kernel_size=3, padding=1, bias=False)
-        self.bn = nn.BatchNorm2d(out_ch)
-        self.act = nn.GELU()
-        # Residual projection if channels differ
-        self.proj = nn.Conv2d(in_ch, out_ch, 1, bias=False) if in_ch != out_ch else nn.Identity()
-    
+
+        def conv_block(cin: int, cout: int) -> nn.Sequential:
+            return nn.Sequential(
+                nn.Conv2d(cin, cout, kernel_size=3, stride=1, padding=1, bias=False),
+                nn.BatchNorm2d(cout),
+                nn.SiLU(inplace=True),
+                nn.MaxPool2d(kernel_size=2, stride=2),
+            )
+
+        self.stem = nn.Sequential(
+            conv_block(in_ch, out_ch),
+            conv_block(out_ch, out_ch),
+        )
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.proj(x) + self.act(self.bn(self.conv(x)))
+        return self.stem(x)
 
 
 class USCMambaNet(nn.Module):
@@ -54,13 +57,12 @@ class USCMambaNet(nn.Module):
     
     Uses ADD-vs-MULTIPLY design principles:
     - ADD: Feature extraction (encoder, fusion, channel mixing)
-    - MUL: Feature selection (unified attention after fusion ONLY)
-    - Cross-Attention: Prototype-guided query refinement
+    - MUL: Feature selection (late attention bridge by default)
     - Similarity: Cosine with Bottleneck
     
     Architecture:
-        Input → Encoder → DualBranchFusion → UnifiedAttention
-              → PrototypeCrossAttention → GAP → CosineSimilarityHead → Scores
+        Input → Encoder → DualBranchFusion → (UnifiedAttention optional)
+              → LateAttentionBridge → GAP → CosineSimilarityHead → Scores
         
         Encoder:
             PatchEmbed2D → ConvBlocks → PatchMerging2D → ChannelProjection
@@ -70,9 +72,6 @@ class USCMambaNet(nn.Module):
         
         Feature Selection (MUL-based):
             UnifiedSpatialChannelAttention: ECA++ (channel) + DWConv (spatial)
-        
-        Query Refinement:
-            PrototypeCrossAttention: Q' = softmax(Q·Pᵀ/√C)·P, Q = Q + α*Q'
         
         Similarity:
             CosineSimilarityHead: Bottleneck → L2 → Cosine
@@ -88,8 +87,8 @@ class USCMambaNet(nn.Module):
         cross_attn_alpha: Residual weight for cross-attention (default: 0.1)
         use_projection: Whether to use bottleneck projection (default: True)
         dualpath_mode: 'both', 'local_only', 'global_only', or 'none' (default: 'both')
-        use_unified_attention: Enable unified multi-scale attention (default: True)
-        use_cross_attention: Enable prototype cross-attention (default: True)
+        use_unified_attention: Enable unified multi-scale attention (default: False)
+        use_cross_attention: Deprecated, kept for backward compatibility
         device: Device to use
     """
     
@@ -108,7 +107,7 @@ class USCMambaNet(nn.Module):
         proto_pool_size: int = 12,
         num_prototypes: int = 2,
         detach_prototypes: bool = False,
-        use_axis_proto: bool = True,
+        use_axis_proto: bool = False,
         axis_proto_pool: str = 'mean',
         axis_proto_mix_init: Tuple[float, float, float] = (1.0, 0.5, 0.5),
         use_late_attention: bool = True,
@@ -125,8 +124,8 @@ class USCMambaNet(nn.Module):
         use_projection: bool = True,
         # Ablation flags
         dualpath_mode: str = 'both',  # 'both', 'local_only', 'global_only', 'none'
-        use_unified_attention: bool = True,
-        use_cross_attention: bool = True,
+        use_unified_attention: bool = False,
+        use_cross_attention: bool = False,
         device: str = 'cuda',
         **kwargs  # For backward compatibility
     ):
@@ -141,27 +140,14 @@ class USCMambaNet(nn.Module):
         # Ablation flags
         self.dualpath_mode = dualpath_mode
         self.use_unified_attention = use_unified_attention
-        self.use_cross_attention = use_cross_attention
+        # Cross-attention removed from main architecture (kept args for compatibility).
+        self.use_cross_attention = False
         
         # ============================================================
-        # STAGES 1-2: Lightweight Conv Stem (2 blocks)
-        # Input: (B, 3, 128, 128) → Output: (B, 64, 32, 32)
-        # Preserves spatial resolution for Mamba/LKA
+        # STAGES 1-2: Conv stem for 64x64 input
+        # Input: (B, 3, 64, 64) → Output: (B, hidden_dim, 16, 16)
         # ============================================================
-        def conv_block(in_ch, out_ch):
-            """Standard conv block: Conv → BN → SiLU → MaxPool"""
-            return nn.Sequential(
-                nn.Conv2d(in_ch, out_ch, kernel_size=3, stride=1, padding=1, bias=False),
-                nn.BatchNorm2d(out_ch),
-                nn.SiLU(inplace=True),
-                nn.MaxPool2d(kernel_size=2, stride=2)  # /2
-            )
-        
-        self.backbone = nn.Sequential(
-            conv_block(in_channels, hidden_dim),      # 3 → 64, 128 → 64
-            conv_block(hidden_dim, hidden_dim),       # 64 → 64, 64 → 32
-        )
-        # Final output: (B, 64, 32, 32) with 2 MaxPools (128 / 4 = 32)
+        self.backbone = ConvStem64(in_channels, hidden_dim)
         
         # ============================================================
         # STAGE 5: Feature Extraction (ADD-based) - ABLATION: dualpath_mode
@@ -204,21 +190,9 @@ class USCMambaNet(nn.Module):
             self.late_attention = nn.Identity()
         
         # ============================================================
-        # STAGE 7: Prototype Cross-Attention - ABLATION: use_cross_attention
-        # ============================================================
-        if self.use_cross_attention:
-            self.proto_cross_attn = PrototypeCrossAttention(
-                channels=hidden_dim,
-                alpha=cross_attn_alpha,
-                proto_pool_size=proto_pool_size,
-                num_prototypes=num_prototypes,
-                detach_prototypes=detach_prototypes,
-                use_axis_proto=use_axis_proto,
-                axis_proto_pool=axis_proto_pool,
-                axis_proto_mix_init=axis_proto_mix_init,
-            )
-        else:
-            self.proto_cross_attn = None
+        # STAGE 7: Prototype Cross-Attention removed (architecture simplification)
+        # Keep placeholder for backward compatibility with old checkpoints/code paths.
+        self.proto_cross_attn = None
         
         # ============================================================
         # STAGE 8: Cosine Similarity Head (Bottleneck → L2 → Cosine)
@@ -263,7 +237,7 @@ class USCMambaNet(nn.Module):
         Returns:
             features: (B, hidden_dim, H', W') encoded features
         """
-        # Stages 1-2: Conv stem (B, 3, 128, 128) → (B, 64, 32, 32)
+        # Stages 1-2: Conv stem (B, 3, 64, 64) → (B, hidden_dim, 16, 16)
         f = self.backbone(x)
         
         # Stage 5: Dual branch fusion (ADD-based) - conditional
@@ -296,13 +270,12 @@ class USCMambaNet(nn.Module):
         support: torch.Tensor,
         return_aux: bool = False,
     ) -> torch.Tensor:
-        """Few-shot classification with Prototype Cross-Attention and Cosine Similarity.
+        """Few-shot classification with simplified late-attention architecture.
         
         Pipeline:
             1. Encode query and support images
-            2. PrototypeCrossAttention: Refine query with prototype maps (if enabled)
-            3. GAP on refined queries
-            4. CosineSimilarityHead: Bottleneck → L2 → Cosine
+            2. GAP on query/support features
+            3. CosineSimilarityHead: Bottleneck → L2 → Cosine
         
         Args:
             query: (B, NQ, C, H, W) query images
@@ -333,33 +306,11 @@ class USCMambaNet(nn.Module):
             s_gap = s_features.mean(dim=[2, 3]).view(Way, Shot, -1)  # (Way, Shot, hidden)
             
             # ============================================================
-            # Step 2: Prototype Cross-Attention (refine query) - conditional
+            # Step 2: Direct prototype matching (cross-attention removed)
             # ============================================================
-            if self.use_cross_attention and self.proto_cross_attn is not None:
-                # Q' = softmax(Q·Pᵀ/√C)·P, Q = Q + α*Q'
-                # refined_query: (NQ, Way, hidden, H', W')
-                refined_query, proto_maps = self.proto_cross_attn(
-                    query_feat=q_features,
-                    support_feat=s_features,
-                    way_num=Way,
-                    shot_num=Shot
-                )
-                
-                # (NQ, Way, hidden, H', W') → (NQ, Way, hidden)
-                q_vectors = refined_query.mean(dim=[3, 4])  # GAP
-                
-                # Support vectors from prototype maps: (Way, K, hidden, H', W') -> (Way, hidden)
-                s_vectors = proto_maps.mean(dim=[1, 3, 4])
-            else:
-                # No cross-attention: direct GAP on features
-                # Query: (NQ, hidden, H', W') → (NQ, hidden)
-                q_gap = q_features.mean(dim=[2, 3])  # (NQ, hidden)
-                
-                # Support: (Way*Shot, hidden, H', W') → (Way, hidden)
-                s_vectors = s_gap.mean(dim=1)  # (Way, hidden)
-                
-                # Expand q_vectors for each class
-                q_vectors = q_gap.unsqueeze(1).expand(-1, Way, -1)  # (NQ, Way, hidden)
+            q_gap = q_features.mean(dim=[2, 3])  # (NQ, hidden)
+            s_vectors = s_gap.mean(dim=1)  # (Way, hidden)
+            q_vectors = q_gap.unsqueeze(1).expand(-1, Way, -1)  # (NQ, Way, hidden)
             
             # ============================================================
             # Step 3: Cosine + UAPS scoring

@@ -1,17 +1,19 @@
 """Unified Ablation Runner - Run ALL ablation experiments.
 
 This script runs ablation studies for USCMambaNet:
-    1. DualPath ablation: local_only, global_only, both (feature extraction)
-    2. Unified Attention ablation: with vs without unified attention
-    3. Cross Attention ablation: with vs without prototype cross-attention
+    1. DualPath ablation: local_only, global_only, both
+    2. Global context ablation: with vs without multi-scale global branch
+    3. Attention stack ablation: none / unified_only / late_only / both
+    4. Prototype ablation: no_cross / cross_no_axis / cross_axis
 
 Each ablation produces results files for comparison.
-NOTE: ArcFace/CosFace is NOT used in ablation experiments.
+NOTE: CE-only objective is used in ablation experiments.
 
 Usage:
     python run_ablation.py --ablation dualpath
-    python run_ablation.py --ablation unified_attention
-    python run_ablation.py --ablation cross_attention
+    python run_ablation.py --ablation global_context
+    python run_ablation.py --ablation attention_stack
+    python run_ablation.py --ablation prototype
     python run_ablation.py --ablation all
 """
 import os
@@ -20,7 +22,6 @@ import argparse
 import subprocess
 from dataclasses import dataclass, field
 from typing import List, Dict
-from datetime import datetime
 
 
 # =============================================================================
@@ -32,18 +33,18 @@ class AblationConfig:
     """Unified ablation configuration."""
     
     # Dataset
-    dataset_path: str = '/mnt/disk2/nhatnc/res/scalogram_fewshot/proposed_model/smnet/scalogram_27_1'
+    dataset_path: str = '/mnt/disk2/nhatnc/res/scalogram_fewshot/proposed_model/smnet/scalogram_knee_augmented_split'
     dataset_name: str = 'knee_aug_split'
     
     # Few-shot settings
     way_num: int = 4
-    shots: List[int] = field(default_factory=lambda: [1, 5])
+    shots: List[int] = field(default_factory=lambda: [1])
     query_num_train: int = 1
     query_num_val: int = 1
     query_num_test: int = 1
     
     # Training
-    training_samples_list: List[int] = field(default_factory=lambda: [32, 64, 160])
+    training_samples_list: List[int] = field(default_factory=lambda: [60])
     num_epochs: int = 100
     lr: float = 1e-3
     eta_min: float = 1e-5
@@ -74,19 +75,25 @@ ABLATION_DUALPATH = {
     'modes': ['local_only', 'global_only', 'both'],
 }
 
-ABLATION_UNIFIED_ATTENTION = {
-    'name': 'unified_attention',
-    'description': 'Unified Attention: Without vs With',
-    'modes': ['without', 'with'],
+ABLATION_GLOBAL_CONTEXT = {
+    'name': 'global_context',
+    'description': 'Global Context: without_ms vs with_ms',
+    'modes': ['without_ms', 'with_ms'],
 }
 
-ABLATION_CROSS_ATTENTION = {
-    'name': 'cross_attention',
-    'description': 'Cross Attention: Without vs With',
-    'modes': ['without', 'with'],
+ABLATION_ATTENTION_STACK = {
+    'name': 'attention_stack',
+    'description': 'Attention Stack: none vs unified_only vs late_only vs both',
+    'modes': ['none', 'unified_only', 'late_only', 'both'],
 }
 
-ALL_ABLATIONS = [ABLATION_DUALPATH, ABLATION_UNIFIED_ATTENTION, ABLATION_CROSS_ATTENTION]
+ABLATION_PROTOTYPE = {
+    'name': 'prototype',
+    'description': 'Prototype Refinement: no_cross vs cross_no_axis vs cross_axis',
+    'modes': ['no_cross', 'cross_no_axis', 'cross_axis'],
+}
+
+ALL_ABLATIONS = [ABLATION_DUALPATH, ABLATION_GLOBAL_CONTEXT, ABLATION_ATTENTION_STACK, ABLATION_PROTOTYPE]
 
 
 # =============================================================================
@@ -104,7 +111,7 @@ def run_single_experiment(
     
     Args:
         config: AblationConfig
-        ablation_type: 'dualpath', 'unified_attention', or 'cross_attention'
+        ablation_type: One of supported ablation groups
         mode: Mode within the ablation type
         shot: Shot number (1, 5)
         training_samples: Number of training samples
@@ -255,11 +262,11 @@ def get_args():
     parser = argparse.ArgumentParser(description='Run USCMambaNet ablation studies')
     
     parser.add_argument('--ablation', type=str, default='all',
-                        choices=['dualpath', 'unified_attention', 'cross_attention', 'all'],
+                        choices=['dualpath', 'global_context', 'attention_stack', 'prototype', 'all'],
                         help='Which ablation to run')
     
     parser.add_argument('--dataset_path', type=str, 
-                        default='/mnt/disk2/nhatnc/res/scalogram_fewshot/proposed_model/smnet/scalogram_27_1')
+                        default='/mnt/disk2/nhatnc/res/scalogram_fewshot/proposed_model/smnet/scalogram_knee_augmented_split')
     parser.add_argument('--dataset_name', type=str, default='knee_aug_split')
     parser.add_argument('--project', type=str, default='uscmamba-ablation')
     
@@ -272,7 +279,7 @@ def get_args():
     parser.add_argument('--num_epochs', type=int, default=100)
     parser.add_argument('--image_size', type=int, default=64)
     
-    parser.add_argument('--training_samples', type=str, default='32,64,160',
+    parser.add_argument('--training_samples', type=str, default='60',
                         help='Comma-separated list of training sample sizes')
     
     parser.add_argument('--dry_run', action='store_true',
@@ -311,7 +318,7 @@ def main():
     print(f"Shots: {config.shots}")
     print(f"Training samples: {config.training_samples_list}")
     print(f"Image size: {config.image_size}")
-    print(f"NOTE: ArcFace/CosFace is DISABLED for ablation experiments")
+    print("NOTE: CE-only objective (no center loss / no margin loss / no hard mining)")
     print("=" * 70)
     
     if args.dry_run:

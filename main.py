@@ -70,9 +70,9 @@ def get_args():
     parser.add_argument('--proto_pool_size', type=int, default=12,
                         help='Prototype spatial pooling size')
     parser.add_argument('--num_prototypes', type=int, default=2,
-                        help='Number of prototypes per class in cross-attention')
+                        help='Deprecated (cross-attention disabled): number of prototypes per class')
     parser.add_argument('--detach_prototypes', action='store_true',
-                        help='Detach prototype maps in cross-attention (default: False)')
+                        help='Deprecated (cross-attention disabled)')
     parser.add_argument('--similarity_proj_dim', type=int, default=None,
                         help='Projection dim for similarity head (default: hidden_dim)')
     
@@ -93,12 +93,12 @@ def get_args():
     parser.add_argument('--dualpath_mode', type=str, default='both',
                         choices=['local_only', 'global_only', 'both'],
                         help='DualPath mode: local_only, global_only, or both (default: both)')
-    parser.add_argument('--use_unified_attention', type=str, default='true',
+    parser.add_argument('--use_unified_attention', type=str, default='false',
                         choices=['true', 'false'],
-                        help='Use Unified Spatial-Channel Attention (default: true)')
-    parser.add_argument('--use_cross_attention', type=str, default='true',
+                        help='Use Unified Spatial-Channel Attention (default: false, late_only stack)')
+    parser.add_argument('--use_cross_attention', type=str, default='false',
                         choices=['true', 'false'],
-                        help='Use Prototype Cross-Attention (default: true)')
+                        help='Use Prototype Cross-Attention (default: false)')
     parser.add_argument('--use_ms_global', type=str, default='true',
                         choices=['true', 'false'],
                         help='Enable multi-scale shared-weight global branch')
@@ -113,9 +113,9 @@ def get_args():
                         help='Window size for late single-head attention')
     parser.add_argument('--late_attn_dropout', type=float, default=0.0,
                         help='Attention dropout for late bridge')
-    parser.add_argument('--use_axis_proto', type=str, default='true',
+    parser.add_argument('--use_axis_proto', type=str, default='false',
                         choices=['true', 'false'],
-                        help='Enable dual-axis prototype tokenization')
+                        help='Enable dual-axis prototype tokenization (only used with cross-attention)')
     parser.add_argument('--axis_proto_pool', type=str, default='mean',
                         choices=['mean', 'max'],
                         help='Pooling mode for axis prototype tokens')
@@ -142,7 +142,7 @@ def get_args():
     parser.add_argument('--uaps_eps', type=float, default=1e-4,
                         help='UAPS numerical epsilon')
     parser.add_argument('--cross_attn_alpha', type=float, default=0.3,
-                        help='Prototype Cross-Attention residual weight (0.1-0.5)')
+                        help='Deprecated (cross-attention disabled)')
     parser.add_argument('--use_pair_expert', type=str, default='false',
                         choices=['true', 'false'],
                         help='Use Pair Expert Correction head')
@@ -209,6 +209,13 @@ def get_model(args):
     use_ms_global = args.use_ms_global.lower() == 'true'
     use_late_attention = args.use_late_attention.lower() == 'true'
     use_axis_proto = args.use_axis_proto.lower() == 'true'
+
+    # Cross-attention is removed from the active architecture.
+    if use_cross:
+        print("Info: --use_cross_attention=true requested, but cross-attention is disabled in current model.")
+    use_cross = False
+    if not use_cross:
+        use_axis_proto = False
 
     axis_mix_parts = [p.strip() for p in args.axis_proto_mix_init.split(',')]
     if len(axis_mix_parts) != 3:

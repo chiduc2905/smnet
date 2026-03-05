@@ -49,9 +49,8 @@ MARGIN_SEARCH = {
 
 # Attention Parameters  
 ATTENTION_SEARCH = {
-    'cross_attn_alpha': [0.05, 0.1, 0.2, 0.3],
-    'use_unified_attention': ['true', 'false'],
-    'use_cross_attention': ['true', 'false'],
+    'late_attn_window': [4, 8],
+    'late_attn_dropout': [0.0, 0.05],
 }
 
 # Temperature Parameters
@@ -198,9 +197,11 @@ def run_experiment(config, base_args):
         '--use_late_attention', 'true',
         '--late_attn_window', '4',
         '--late_attn_dropout', '0.0',
-        '--use_axis_proto', 'true',
+        '--use_axis_proto', 'false',
         '--axis_proto_pool', 'mean',
         '--axis_proto_mix_init', '1.0,0.5,0.5',
+        '--use_unified_attention', 'false',
+        '--use_cross_attention', 'false',
         '--delta_lambda', '0.35',  # Synced with main.py default
         '--episode_num_train', '200',
         '--episode_num_val', '300',
