@@ -23,13 +23,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import Optional, Tuple
-from einops import rearrange
 
-from net.backbone.feature_extractor import PatchEmbed2D, PatchMerging2D
 from net.backbone.dual_branch_fusion import DualBranchFusion
+from net.backbone.late_attention_bridge import LateSingleHeadAttentionBridge
 from net.backbone.unified_attention import UnifiedSpatialChannelAttention
 from net.metrics.hybrid_similarity_head import CosineSimilarityHead
 from net.metrics.prototype_cross_attention import PrototypeCrossAttention
+from net.metrics.pair_expert_head import PairExpertCorrectionHead
 
 
 class ConvBlock(nn.Module):
@@ -82,7 +82,8 @@ class USCMambaNet(nn.Module):
         base_dim: Base embedding dim (default: 32)
         hidden_dim: Hidden dim (default: 64)
         num_merging_stages: Patch merging stages (default: 2)
-        d_state: Mamba state dimension (default: 4)
+        d_state: Mamba state dimension (default: 8)
+        global_expand: Expansion factor in VSS global branch (default: 2)
         temperature: Temperature for cosine similarity (default: 16.0)
         cross_attn_alpha: Residual weight for cross-attention (default: 0.1)
         use_projection: Whether to use bottleneck projection (default: True)
@@ -98,9 +99,29 @@ class USCMambaNet(nn.Module):
         base_dim: int = 32,
         hidden_dim: int = 64,
         num_merging_stages: int = 2,
-        d_state: int = 4,
+        d_state: int = 8,
+        global_expand: int = 2,
         temperature: float = 16.0,
+        beta_maha: float = 0.25,
+        uaps_eps: float = 1e-4,
         cross_attn_alpha: float = 0.1,
+        proto_pool_size: int = 12,
+        num_prototypes: int = 2,
+        detach_prototypes: bool = False,
+        use_axis_proto: bool = True,
+        axis_proto_pool: str = 'mean',
+        axis_proto_mix_init: Tuple[float, float, float] = (1.0, 0.5, 0.5),
+        use_late_attention: bool = True,
+        late_attn_window: int = 4,
+        late_attn_dropout: float = 0.0,
+        similarity_proj_dim: Optional[int] = None,
+        way_num: int = 4,
+        use_pair_expert: bool = False,
+        pair_conf_threshold: float = 0.60,
+        pair_delta_max: float = 0.5,
+        use_ms_global: bool = True,
+        ms_downsample: int = 2,
+        atrous_rate: int = 2,
         use_projection: bool = True,
         # Ablation flags
         dualpath_mode: str = 'both',  # 'both', 'local_only', 'global_only', 'none'
@@ -115,6 +136,7 @@ class USCMambaNet(nn.Module):
         self.device = device
         self.temperature = temperature
         self.use_projection = use_projection
+        self.way_num = way_num
         
         # Ablation flags
         self.dualpath_mode = dualpath_mode
@@ -148,8 +170,12 @@ class USCMambaNet(nn.Module):
             self.dual_branch = DualBranchFusion(
                 channels=hidden_dim,
                 d_state=d_state,
+                expand=global_expand,
                 dilation=2,
-                mode=self.dualpath_mode  # 'both', 'local_only', or 'global_only'
+                mode=self.dualpath_mode,  # 'both', 'local_only', or 'global_only'
+                use_ms_global=use_ms_global,
+                ms_downsample=ms_downsample,
+                atrous_rate=atrous_rate,
             )
         else:
             # No dual branch processing - identity
@@ -163,6 +189,19 @@ class USCMambaNet(nn.Module):
         else:
             # Simple identity - no attention
             self.unified_attention = nn.Identity()
+
+        # ============================================================
+        # STAGE 6.5: Late Single-Head Attention Bridge
+        # ============================================================
+        self.use_late_attention = bool(use_late_attention)
+        if self.use_late_attention:
+            self.late_attention = LateSingleHeadAttentionBridge(
+                channels=hidden_dim,
+                window_size=late_attn_window,
+                attn_dropout=late_attn_dropout,
+            )
+        else:
+            self.late_attention = nn.Identity()
         
         # ============================================================
         # STAGE 7: Prototype Cross-Attention - ABLATION: use_cross_attention
@@ -170,7 +209,13 @@ class USCMambaNet(nn.Module):
         if self.use_cross_attention:
             self.proto_cross_attn = PrototypeCrossAttention(
                 channels=hidden_dim,
-                alpha=cross_attn_alpha
+                alpha=cross_attn_alpha,
+                proto_pool_size=proto_pool_size,
+                num_prototypes=num_prototypes,
+                detach_prototypes=detach_prototypes,
+                use_axis_proto=use_axis_proto,
+                axis_proto_pool=axis_proto_pool,
+                axis_proto_mix_init=axis_proto_mix_init,
             )
         else:
             self.proto_cross_attn = None
@@ -180,10 +225,32 @@ class USCMambaNet(nn.Module):
         # ============================================================
         self.similarity_head = CosineSimilarityHead(
             in_dim=hidden_dim,
-            proj_dim=hidden_dim // 2,
+            proj_dim=similarity_proj_dim if similarity_proj_dim is not None else hidden_dim,
             temperature=temperature,
+            beta_maha=beta_maha,
+            uaps_eps=uaps_eps,
+            num_classes=way_num,
             use_projection=use_projection
         )
+
+        # Pair expert refinement for known confusing boundaries.
+        if way_num >= 4:
+            pair_defs = ((0, 3), (1, 2))
+        elif way_num == 2:
+            pair_defs = ((0, 1),)
+        else:
+            pair_defs = ()
+
+        self.use_pair_expert = bool(use_pair_expert and len(pair_defs) > 0)
+        if self.use_pair_expert:
+            self.pair_expert = PairExpertCorrectionHead(
+                embed_dim=self.similarity_head.proj_dim,
+                pairs=pair_defs,
+                delta_max=pair_delta_max,
+                conf_threshold=pair_conf_threshold,
+            )
+        else:
+            self.pair_expert = None
         
         self.to(device)
     
@@ -204,6 +271,9 @@ class USCMambaNet(nn.Module):
         
         # Stage 6: Unified attention (MUL-based) - conditional
         f = self.unified_attention(f)
+
+        # Stage 6.5: Late attention bridge
+        f = self.late_attention(f)
         
         return f
     
@@ -223,7 +293,8 @@ class USCMambaNet(nn.Module):
     def forward(
         self,
         query: torch.Tensor,
-        support: torch.Tensor
+        support: torch.Tensor,
+        return_aux: bool = False,
     ) -> torch.Tensor:
         """Few-shot classification with Prototype Cross-Attention and Cosine Similarity.
         
@@ -245,6 +316,9 @@ class USCMambaNet(nn.Module):
         Shot = support.shape[2]
         
         all_scores = []
+        all_raw_scores = []
+        pair_logits_collect = None
+        pair_gates_collect = None
         
         for b in range(B):
             # ============================================================
@@ -256,6 +330,7 @@ class USCMambaNet(nn.Module):
             # Support: (Way*Shot, C, H, W) → (Way*Shot, hidden, H', W')
             s_flat = support[b].view(Way * Shot, C, H, W)
             s_features = self.encode(s_flat)  # (Way*Shot, hidden, H', W')
+            s_gap = s_features.mean(dim=[2, 3]).view(Way, Shot, -1)  # (Way, Shot, hidden)
             
             # ============================================================
             # Step 2: Prototype Cross-Attention (refine query) - conditional
@@ -273,43 +348,69 @@ class USCMambaNet(nn.Module):
                 # (NQ, Way, hidden, H', W') → (NQ, Way, hidden)
                 q_vectors = refined_query.mean(dim=[3, 4])  # GAP
                 
-                # Support vectors from prototype maps: (Way, hidden, H', W') → (Way, hidden)
-                s_vectors = proto_maps.mean(dim=[2, 3])  # GAP
+                # Support vectors from prototype maps: (Way, K, hidden, H', W') -> (Way, hidden)
+                s_vectors = proto_maps.mean(dim=[1, 3, 4])
             else:
                 # No cross-attention: direct GAP on features
                 # Query: (NQ, hidden, H', W') → (NQ, hidden)
                 q_gap = q_features.mean(dim=[2, 3])  # (NQ, hidden)
                 
                 # Support: (Way*Shot, hidden, H', W') → (Way, hidden)
-                s_gap = s_features.mean(dim=[2, 3])  # (Way*Shot, hidden)
-                s_vectors = s_gap.view(Way, Shot, -1).mean(dim=1)  # (Way, hidden)
+                s_vectors = s_gap.mean(dim=1)  # (Way, hidden)
                 
                 # Expand q_vectors for each class
                 q_vectors = q_gap.unsqueeze(1).expand(-1, Way, -1)  # (NQ, Way, hidden)
             
             # ============================================================
-            # Step 3: Cosine Similarity for each query-prototype pair
+            # Step 3: Cosine + UAPS scoring
             # ============================================================
-            scores_list = []
-            for c in range(Way):
-                q_c = q_vectors[:, c, :]  # (NQ, hidden)
-                s_c = s_vectors[c:c+1, :]  # (1, hidden)
-                
-                # Project both
-                z_q = self.similarity_head.project(q_c)  # (NQ, D)
-                z_s = self.similarity_head.project(s_c)  # (1, D)
-                z_s = F.normalize(z_s, p=2, dim=-1)  # Re-normalize
-                
-                # Cosine similarity
-                score_c = torch.mm(z_q, z_s.t())  # (NQ, 1)
-                score_c = self.similarity_head.temperature * score_c
-                scores_list.append(score_c)
-            
-            # Stack: (NQ, Way)
-            scores = torch.cat(scores_list, dim=1)
+            raw_scores = self.similarity_head.forward_episode(
+                query_vectors=q_vectors,
+                support_shots=s_gap,
+                prototype_vectors=s_vectors,
+            )
+            scores = raw_scores
+
+            # ============================================================
+            # Step 4: Pair Expert correction (optional)
+            # ============================================================
+            if self.use_pair_expert and self.pair_expert is not None:
+                q_base = q_features.mean(dim=[2, 3])  # (NQ, hidden)
+                z_base = self.similarity_head.project(q_base)  # (NQ, D)
+                scores, pair_aux = self.pair_expert(z_base, scores)
+
+                if pair_logits_collect is None:
+                    pair_logits_collect = [[] for _ in pair_aux["expert_logits"]]
+                    pair_gates_collect = [[] for _ in pair_aux["gates"]]
+                for i in range(len(pair_aux["expert_logits"])):
+                    pair_logits_collect[i].append(pair_aux["expert_logits"][i])
+                    pair_gates_collect[i].append(pair_aux["gates"][i])
+
+            all_raw_scores.append(raw_scores)
             all_scores.append(scores)
-        
-        return torch.cat(all_scores, dim=0)  # (B*NQ, Way)
+
+        scores_out = torch.cat(all_scores, dim=0)  # (B*NQ, Way)
+        if not return_aux:
+            return scores_out
+
+        aux = {
+            "raw_scores": torch.cat(all_raw_scores, dim=0),
+            "expert_logits": None,
+            "expert_gates": None,
+        }
+        if pair_logits_collect is not None:
+            aux["expert_logits"] = [torch.cat(v, dim=0) for v in pair_logits_collect]
+            aux["expert_gates"] = [torch.cat(v, dim=0) for v in pair_gates_collect]
+        return scores_out, aux
+
+    def compute_pair_expert_loss(self, aux: Optional[dict], targets: torch.Tensor) -> Optional[torch.Tensor]:
+        """Compute auxiliary BCE loss for pair experts."""
+        if not self.use_pair_expert or self.pair_expert is None or aux is None:
+            return None
+        expert_logits = aux.get("expert_logits")
+        if expert_logits is None:
+            return None
+        return self.pair_expert.compute_loss(expert_logits, targets)
     
     def get_features(self, images: torch.Tensor) -> torch.Tensor:
         """Extract features for visualization.

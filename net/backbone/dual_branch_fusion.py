@@ -597,9 +597,12 @@ class VSSBlock(nn.Module):
             **kwargs
         )
         
-        # Drop path for regularization
-        from timm.layers import DropPath
-        self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
+        # Drop path for regularization (fallback if timm is unavailable)
+        try:
+            from timm.layers import DropPath
+            self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
+        except ImportError:
+            self.drop_path = nn.Identity()
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -648,22 +651,33 @@ class DualBranchFusion(nn.Module):
     
     Args:
         channels: Number of input/output channels
-        d_state: SSM state dimension for global branch (default: 4)
+        d_state: SSM state dimension for global branch (default: 8)
+        expand: Expansion factor for global VSS branch (default: 2)
         dilation: Dilation rate for local branch mid-range conv (default: 2)
         mode: Ablation mode - 'both', 'local_only', 'global_only' (default: 'both')
+        use_ms_global: Enable shared-weight multi-scale global branch (default: True)
+        ms_downsample: Downsample ratio for extra global scale (default: 2)
+        atrous_rate: Dilation rate for lightweight atrous branch (default: 2)
     """
     
     def __init__(
         self,
         channels: int,
         d_state: int = 8,  # Few-shot optimized
+        expand: int = 2,
         dilation: int = 2,
-        mode: str = 'both'
+        mode: str = 'both',
+        use_ms_global: bool = True,
+        ms_downsample: int = 2,
+        atrous_rate: int = 2,
     ):
         super().__init__()
         
         self.channels = channels
         self.mode = mode
+        self.use_ms_global = bool(use_ms_global and mode in ['both', 'global_only'])
+        self.ms_downsample = max(1, int(ms_downsample))
+        self.atrous_rate = max(1, int(atrous_rate))
         
         # Branch 1: Local-Mid Spatial & Channel (uses ChannelMamba)
         if mode in ['both', 'local_only']:
@@ -675,12 +689,37 @@ class DualBranchFusion(nn.Module):
         if mode in ['both', 'global_only']:
             self.global_branch = VSSBlock(
                 d_model=channels,
-                d_state=d_state,  # Default 16 from function param
+                d_state=d_state,
                 d_conv=3,
-                expand=1  # Few-shot optimized (was 2)
+                expand=expand
+            )
+            # EfficientVMamba-inspired atrous companion branch
+            self.global_atrous = nn.Sequential(
+                nn.Conv2d(
+                    channels,
+                    channels,
+                    kernel_size=3,
+                    padding=self.atrous_rate,
+                    dilation=self.atrous_rate,
+                    groups=channels,
+                    bias=False,
+                ),
+                nn.Conv2d(channels, channels, kernel_size=1, bias=False),
+                nn.SiLU(inplace=True),
+            )
+            # MSVMamba-style multi-scale fusion + lightweight ConvFFN
+            self.global_fuse_proj = nn.Conv2d(channels * 3, channels, kernel_size=1, bias=False)
+            self.global_convffn = nn.Sequential(
+                nn.Conv2d(channels, channels, kernel_size=1, bias=False),
+                nn.GELU(),
+                nn.Conv2d(channels, channels, kernel_size=3, padding=1, groups=channels, bias=False),
+                nn.Conv2d(channels, channels, kernel_size=1, bias=False),
             )
         else:
             self.global_branch = None
+            self.global_atrous = None
+            self.global_fuse_proj = None
+            self.global_convffn = None
         
         # Fusion: depends on mode
         if mode == 'both':
@@ -694,6 +733,29 @@ class DualBranchFusion(nn.Module):
         
         # Final normalization
         self.norm = nn.LayerNorm(channels)
+
+    def _forward_global(self, x: torch.Tensor) -> torch.Tensor:
+        """Global branch with optional shared-weight multi-scale + atrous fusion."""
+        if self.global_branch is None:
+            return x
+
+        g_main = self.global_branch(x)
+        if not self.use_ms_global:
+            return g_main
+
+        _, _, h, w = x.shape
+        if self.ms_downsample > 1 and min(h, w) >= self.ms_downsample:
+            x_half = F.avg_pool2d(x, kernel_size=self.ms_downsample, stride=self.ms_downsample)
+            g_half = self.global_branch(x_half)  # shared weights
+            g_half_up = F.interpolate(g_half, size=(h, w), mode='bilinear', align_corners=False)
+        else:
+            g_half_up = g_main
+
+        g_atrous = self.global_atrous(x)
+        g_cat = torch.cat([g_main, g_half_up, g_atrous], dim=1)
+        g_fused = self.global_fuse_proj(g_cat)
+        # ConvFFN residual refinement
+        return g_fused + self.global_convffn(g_fused)
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -713,7 +775,7 @@ class DualBranchFusion(nn.Module):
             f_local = self.local_branch(x)  # (B, C, H, W)
             
             # === BRANCH 2: Global Processing ===
-            f_global = self.global_branch(x)  # (B, C, H, W)
+            f_global = self._forward_global(x)  # (B, C, H, W)
             
             # === FUSION ===
             f_cat = torch.cat([f_local, f_global], dim=1)  # (B, 2C, H, W)
@@ -723,7 +785,7 @@ class DualBranchFusion(nn.Module):
             f_proj = self.local_branch(x) - x  # Get residual of local branch
             
         elif self.mode == 'global_only':
-            f_proj = self.global_branch(x) - x  # Get residual of global branch
+            f_proj = self._forward_global(x) - x  # Get residual of global branch
         
         # === ANCHOR-GUIDED RESIDUAL ===
         # Y = Norm(X + α · Proj(F_cat))
@@ -746,11 +808,18 @@ class DualBranchFusion(nn.Module):
             dict with 'anchor', 'local', 'global', 'fused' tensors
         """
         anchor = x
-        f_local = self.local_branch(x)
-        f_global = self.global_branch(x)
-        
-        f_cat = torch.cat([f_local, f_global], dim=1)
-        f_proj = self.fusion_proj(f_cat)
+        f_local = self.local_branch(x) if self.local_branch is not None else x
+        f_global = self._forward_global(x) if self.global_branch is not None else x
+
+        if self.mode == 'both':
+            f_cat = torch.cat([f_local, f_global], dim=1)
+            f_proj = self.fusion_proj(f_cat)
+        elif self.mode == 'local_only':
+            f_proj = f_local - x
+        elif self.mode == 'global_only':
+            f_proj = f_global - x
+        else:
+            f_proj = torch.zeros_like(x)
         fused = anchor + self.alpha * f_proj
         
         fused = rearrange(fused, 'b c h w -> b h w c')
@@ -773,14 +842,22 @@ class DualBranchFusion(nn.Module):
 def build_dual_branch_fusion(
     channels: int = 64,
     d_state: int = 16,
-    dilation: int = 2
+    expand: int = 2,
+    dilation: int = 2,
+    use_ms_global: bool = True,
+    ms_downsample: int = 2,
+    atrous_rate: int = 2,
 ) -> DualBranchFusion:
     """Factory function to build DualBranchFusion module.
     
     Args:
         channels: Feature dimension (default: 64)
         d_state: Mamba state dimension (default: 16)
+        expand: Expansion factor for global VSS branch (default: 2)
         dilation: Dilation for local branch (default: 2)
+        use_ms_global: Enable shared-weight multi-scale global branch
+        ms_downsample: Downsample ratio for extra global scale
+        atrous_rate: Dilation for atrous companion branch
         
     Returns:
         Configured DualBranchFusion instance
@@ -788,5 +865,9 @@ def build_dual_branch_fusion(
     return DualBranchFusion(
         channels=channels,
         d_state=d_state,
-        dilation=dilation
+        expand=expand,
+        dilation=dilation,
+        use_ms_global=use_ms_global,
+        ms_downsample=ms_downsample,
+        atrous_rate=atrous_rate,
     )

@@ -21,11 +21,11 @@ def get_args():
     parser = argparse.ArgumentParser(description='Hyperparameter Search for USCMambaNet')
     parser.add_argument('--project', type=str, default='uscmamba-hpsearch', help='WandB project name')
     parser.add_argument('--dataset_path', type=str, 
-                        default='/mnt/disk2/nhatnc/res/scalogram_fewshot/proposed_model/smnet/scalogram_official',
+                        default='/mnt/disk2/nhatnc/res/scalogram_fewshot/proposed_model/smnet/scalogram_27_1',
                         help='Path to dataset')
-    parser.add_argument('--dataset_name', type=str, default='minh', help='Dataset name')
+    parser.add_argument('--dataset_name', type=str, default='knee_aug_split', help='Dataset name')
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
-    parser.add_argument('--training_samples', type=int, default=30, help='Training samples (30, 60, 150)')
+    parser.add_argument('--training_samples', type=int, default=32, help='Training samples (divisible by 4, e.g. 32, 64, 160)')
     parser.add_argument('--shot_num', type=int, default=1, help='Shot number (1 or 5)')
     parser.add_argument('--num_epochs', type=int, default=100, help='Fixed number of epochs')
     parser.add_argument('--search_mode', type=str, default='margin', 
@@ -41,10 +41,10 @@ def get_args():
 
 # Margin Loss Parameters (ArcFace/CosFace)
 MARGIN_SEARCH = {
-    'margin_type': ['arcface', 'cosface', 'none'],
-    'lambda_margin': [0.05, 0.1, 0.2],
-    'margin_scale': [10.0, 15.0, 20.0],
-    'margin': [0.2, 0.3, 0.4],
+    'margin_type': ['none'],
+    'lambda_margin': [0.0],
+    'margin_scale': [1.0],
+    'margin': [0.0],
 }
 
 # Attention Parameters  
@@ -75,22 +75,23 @@ OPTIMIZER_SEARCH = {
 
 # Loss Weight Parameters
 LOSS_WEIGHT_SEARCH = {
-    'lambda_center': [0.0, 0.01, 0.05, 0.1],  # Center loss weight
-    'lambda_margin': [0.0, 0.05, 0.1, 0.2],  # Margin loss weight
+    'lambda_center': [0.0],
+    'lambda_margin': [0.0],
 }
 
 # Regularization Search (focused)
 REGULARIZATION_SEARCH = {
     'weight_decay': [1e-4, 5e-4, 1e-3],
     'grad_clip': [1.0, 2.0],
-    'lambda_center': [0.0, 0.01, 0.05],
+    'lambda_center': [0.0],
 }
 
 # Full Search (reduced grid to avoid explosion)
 FULL_SEARCH = {
-    'margin_type': ['arcface', 'none'],
-    'lambda_margin': [0.1],
-    'margin_scale': [15.0],
+    'margin_type': ['none'],
+    'lambda_margin': [0.0],
+    'margin_scale': [1.0],
+    'margin': [0.0],
     'temperature': [12.0, 16.0],
     'cross_attn_alpha': [0.05, 0.1],
 }
@@ -101,10 +102,10 @@ ALL_SEARCH = {
     'temperature': [12.0, 16.0],
     'cross_attn_alpha': [0.05, 0.1],
     'delta_lambda': [0.2, 0.3],
-    'margin_type': ['arcface', 'none'],
-    'lambda_margin': [0.1],
+    'margin_type': ['none'],
+    'lambda_margin': [0.0],
     'weight_decay': [5e-4],
-    'lambda_center': [0.0, 0.01],
+    'lambda_center': [0.0],
 }
 
 
@@ -165,9 +166,11 @@ def run_experiment(config, base_args):
         sys.executable, 'main.py',
         '--model', 'uscmamba',
         '--shot_num', str(base_args.shot_num),
-        '--way_num', '3',
-        '--query_num', '5',
-        '--image_size', '128',
+        '--way_num', '4',
+        '--query_num_train', '1',
+        '--query_num_val', '1',
+        '--query_num_test', '1',
+        '--image_size', '64',
         '--mode', 'train',
         '--project', base_args.project,
         '--dataset_path', base_args.dataset_path,
@@ -179,7 +182,25 @@ def run_experiment(config, base_args):
         '--weight_decay', '5e-4',
         '--grad_clip', '2.0',  # Synced with main.py default
         '--temperature', '16.0',  # Synced with main.py default
+        '--beta_maha', '0.25',
+        '--uaps_eps', '1e-4',
         '--cross_attn_alpha', '0.3',  # Synced with main.py default
+        '--margin_type', 'none',
+        '--lambda_margin', '0.0',
+        '--lambda_center', '0.0',
+        '--use_pair_expert', 'false',
+        '--lambda_pair', '0.0',
+        '--lambda_pair_expert', '0.0',
+        '--hard_mining_ratio', '0.0',
+        '--use_ms_global', 'true',
+        '--ms_downsample', '2',
+        '--atrous_rate', '2',
+        '--use_late_attention', 'true',
+        '--late_attn_window', '4',
+        '--late_attn_dropout', '0.0',
+        '--use_axis_proto', 'true',
+        '--axis_proto_pool', 'mean',
+        '--axis_proto_mix_init', '1.0,0.5,0.5',
         '--delta_lambda', '0.35',  # Synced with main.py default
         '--episode_num_train', '200',
         '--episode_num_val', '300',

@@ -15,6 +15,7 @@ from .pixel_mamba import SS2D, PixelMamba  # SS2D = 4-way scanning with shared w
 from .dual_branch_fusion import DualBranchFusion, LocalMidBranch, GlobalSS2DBranch
 from .feature_extractor import PatchEmbed2D, PatchMerging2D, SpatialDownsample
 from .unified_attention import UnifiedSpatialChannelAttention
+from .late_attention_bridge import LateSingleHeadAttentionBridge
 
 __all__ = [
     # Legacy modules (still available)
@@ -33,4 +34,6 @@ __all__ = [
     'GlobalSS2DBranch',
     # M4: Unified Attention
     'UnifiedSpatialChannelAttention',
+    # M5: Late attention bridge
+    'LateSingleHeadAttentionBridge',
 ]

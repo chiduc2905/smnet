@@ -13,26 +13,76 @@ from PIL import Image
 import torchvision.transforms as transforms
 
 
-CLASS_MAP = {'corona': 0, 'NotPD': 1, 'surface': 2}
+# Canonical 4-class setup for augmented split dataset
+CLASS_ORDER = ['surface', 'internal', 'corona', 'notpd']
+CLASS_MAP = {name: i for i, name in enumerate(CLASS_ORDER)}
+CLASS_DISPLAY_NAMES = {
+    'surface': 'Surface',
+    'internal': 'Internal',
+    'corona': 'Corona',
+    'notpd': 'NotPD',
+}
+
+
+def canonicalize_class_name(name):
+    """Normalize class folder names (supports legacy aliases)."""
+    key = name.strip().lower()
+    if key in ('notpd', 'nopd', 'not_pd'):
+        return 'notpd'
+    if key in ('surface', 'internal', 'corona'):
+        return key
+    return None
+
+
+def list_image_files(folder):
+    """List image files while excluding labeled helper images."""
+    return sorted([
+        f for f in os.listdir(folder)
+        if f.lower().endswith(('.png', '.jpg', '.jpeg'))
+        and 'labeled' not in f.lower()
+        and 'labeled:' not in f
+    ])
+
+
+def resolve_class_dirs(root_path):
+    """
+    Resolve canonical class -> actual folder path under root_path.
+    If both alias folders exist (e.g., notpd + nopd), first encountered is used.
+    """
+    mapping = {}
+    if not os.path.isdir(root_path):
+        return mapping
+
+    for folder in sorted(os.listdir(root_path)):
+        full = os.path.join(root_path, folder)
+        if not os.path.isdir(full):
+            continue
+        canonical = canonicalize_class_name(folder)
+        if canonical is not None and canonical not in mapping:
+            mapping[canonical] = full
+    return mapping
 
 
 class PDScalogramPreSplit:
     """Dataset loader for pre-split folders (train/val/test already separated).
     
-    Expected folder structure:
+    Expected folder structure (canonical):
         data_path/
             train/
-                corona/
                 surface/
-                nopd/
+                internal/
+                corona/
+                notpd/  (or nopd legacy alias)
             val/
-                corona/
                 surface/
-                nopd/
+                internal/
+                corona/
+                notpd/  (or nopd legacy alias)
             test/
-                corona/
                 surface/
-                nopd/
+                internal/
+                corona/
+                notpd/  (or nopd legacy alias)
     """
     
     def __init__(self, data_path, image_size=64):
@@ -43,7 +93,7 @@ class PDScalogramPreSplit:
         """
         self.data_path = os.path.abspath(data_path)
         self.image_size = image_size
-        self.classes = sorted(CLASS_MAP.keys(), key=lambda c: CLASS_MAP[c])
+        self.classes = list(CLASS_ORDER)
         
         # Placeholders
         self.X_train, self.y_train = [], []
@@ -88,19 +138,15 @@ class PDScalogramPreSplit:
             if not os.path.exists(split_path):
                 print(f"Warning: {split_name} folder not found at {split_path}")
                 continue
-            
-            for class_name in CLASS_MAP:
-                class_path = os.path.join(split_path, class_name)
-                if not os.path.exists(class_path):
-                    print(f"Warning: Class folder not found: {class_path}")
+
+            class_dirs = resolve_class_dirs(split_path)
+            for class_name in CLASS_ORDER:
+                class_path = class_dirs.get(class_name)
+                if class_path is None:
+                    print(f"Warning: Class folder not found: {split_path}/{class_name}")
                     continue
-                
-                # Get all image files, excluding labeled versions
-                files = sorted([f for f in os.listdir(class_path) 
-                               if f.lower().endswith(('.png', '.jpg', '.jpeg'))
-                               and 'labeled' not in f.lower()
-                               and 'labeled:' not in f])
-                
+
+                files = list_image_files(class_path)
                 label = CLASS_MAP[class_name]
                 file_list.extend([(os.path.join(class_path, f), label) for f in files])
         
@@ -171,18 +217,24 @@ class PDScalogramPreSplit:
             np.random.default_rng(0).shuffle(idx)
             self.X_train = self.X_train[idx]
             self.y_train = self.y_train[idx]
+            if len(self.train_files) == len(idx):
+                self.train_files = [self.train_files[i] for i in idx]
         
         if len(self.X_val) > 0:
             idx = np.arange(len(self.X_val))
             np.random.default_rng(1).shuffle(idx)
             self.X_val = self.X_val[idx]
             self.y_val = self.y_val[idx]
+            if len(self.val_files) == len(idx):
+                self.val_files = [self.val_files[i] for i in idx]
         
         if len(self.X_test) > 0:
             idx = np.arange(len(self.X_test))
             np.random.default_rng(2).shuffle(idx)
             self.X_test = self.X_test[idx]
             self.y_test = self.y_test[idx]
+            if len(self.test_files) == len(idx):
+                self.test_files = [self.test_files[i] for i in idx]
 
 
 def load_dataset(data_path, image_size=64, val_per_class=60, test_per_class=60):
@@ -229,7 +281,7 @@ class PDScalogram:
         self.val_per_class = val_per_class
         self.test_per_class = test_per_class
         self.image_size = image_size
-        self.classes = sorted(CLASS_MAP.keys(), key=lambda c: CLASS_MAP[c])
+        self.classes = list(CLASS_ORDER)
         
         # Placeholders
         self.X_train, self.y_train = [], []
@@ -263,18 +315,18 @@ class PDScalogram:
     
     def _prepare_splits(self):
         """Scan directories and split files into train/val/test lists."""
+        # Resolve class folders first (supports aliases like nopd -> notpd)
+        class_dirs = resolve_class_dirs(self.data_path)
+
+        missing = [c for c in CLASS_ORDER if c not in class_dirs]
+        if missing:
+            print(f"Warning: Missing class folders: {missing}")
+
         # Find min class size
         class_sizes = {}
-        for class_name in CLASS_MAP:
-            path = os.path.join(self.data_path, class_name)
-            if os.path.exists(path):
-                files = [f for f in os.listdir(path) 
-                        if f.lower().endswith(('.png', '.jpg', '.jpeg'))
-                        and 'labeled' not in f.lower()
-                        and 'labeled:' not in f]
-                class_sizes[class_name] = len(files)
-            else:
-                class_sizes[class_name] = 0
+        for class_name in CLASS_ORDER:
+            path = class_dirs.get(class_name)
+            class_sizes[class_name] = len(list_image_files(path)) if path else 0
         
         if not class_sizes:
             raise ValueError(f"No data found in {self.data_path}")
@@ -290,15 +342,12 @@ class PDScalogram:
         
         print(f'Split: {val_size}/class for val, {test_size}/class for test, rest for train')
         
-        for class_name in CLASS_MAP:
-            path = os.path.join(self.data_path, class_name)
-            if not os.path.exists(path):
+        for class_name in CLASS_ORDER:
+            path = class_dirs.get(class_name)
+            if path is None:
                 continue
-                
-            files = sorted([f for f in os.listdir(path) 
-                           if f.lower().endswith(('.png', '.jpg', '.jpeg'))
-                           and 'labeled' not in f.lower()
-                           and 'labeled:' not in f])
+
+            files = list_image_files(path)
             random.Random(42).shuffle(files)
             files = files[:min_size]  # Balance classes
             
@@ -378,15 +427,21 @@ class PDScalogram:
             np.random.default_rng(0).shuffle(idx)
             self.X_train = self.X_train[idx]
             self.y_train = self.y_train[idx]
+            if len(self.train_files) == len(idx):
+                self.train_files = [self.train_files[i] for i in idx]
         
         if len(self.X_val) > 0:
             idx = np.arange(len(self.X_val))
             np.random.default_rng(1).shuffle(idx)
             self.X_val = self.X_val[idx]
             self.y_val = self.y_val[idx]
+            if len(self.val_files) == len(idx):
+                self.val_files = [self.val_files[i] for i in idx]
         
         if len(self.X_test) > 0:
             idx = np.arange(len(self.X_test))
             np.random.default_rng(2).shuffle(idx)
             self.X_test = self.X_test[idx]
             self.y_test = self.y_test[idx]
+            if len(self.test_files) == len(idx):
+                self.test_files = [self.test_files[i] for i in idx]

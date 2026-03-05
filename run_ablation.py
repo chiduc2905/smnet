@@ -32,16 +32,18 @@ class AblationConfig:
     """Unified ablation configuration."""
     
     # Dataset
-    dataset_path: str = '/mnt/disk2/nhatnc/res/scalogram_fewshot/proposed_model/smnet/scalogram_official'
-    dataset_name: str = 'minh'
+    dataset_path: str = '/mnt/disk2/nhatnc/res/scalogram_fewshot/proposed_model/smnet/scalogram_27_1'
+    dataset_name: str = 'knee_aug_split'
     
     # Few-shot settings
-    way_num: int = 3
+    way_num: int = 4
     shots: List[int] = field(default_factory=lambda: [1, 5])
-    query_num: int = 5  # Same for train/val/test
+    query_num_train: int = 1
+    query_num_val: int = 1
+    query_num_test: int = 1
     
     # Training
-    training_samples_list: List[int] = field(default_factory=lambda: [30, 60, 150])
+    training_samples_list: List[int] = field(default_factory=lambda: [32, 64, 160])
     num_epochs: int = 100
     lr: float = 1e-3
     eta_min: float = 1e-5
@@ -56,7 +58,7 @@ class AblationConfig:
     project: str = 'uscmamba-ablation'
     
     # Image
-    image_size: int = 128
+    image_size: int = 64
     
     # Seed for reproducibility
     seed: int = 42
@@ -117,7 +119,9 @@ def run_single_experiment(
         '--ablation_mode', mode,
         '--shot_num', str(shot),
         '--way_num', str(config.way_num),
-        '--query_num', str(config.query_num),
+        '--query_num_train', str(config.query_num_train),
+        '--query_num_val', str(config.query_num_val),
+        '--query_num_test', str(config.query_num_test),
         '--image_size', str(config.image_size),
         '--dataset_path', config.dataset_path,
         '--dataset_name', config.dataset_name,
@@ -255,16 +259,20 @@ def get_args():
                         help='Which ablation to run')
     
     parser.add_argument('--dataset_path', type=str, 
-                        default='/mnt/disk2/nhatnc/res/scalogram_fewshot/proposed_model/smnet/scalogram_official')
-    parser.add_argument('--dataset_name', type=str, default='minh')
+                        default='/mnt/disk2/nhatnc/res/scalogram_fewshot/proposed_model/smnet/scalogram_27_1')
+    parser.add_argument('--dataset_name', type=str, default='knee_aug_split')
     parser.add_argument('--project', type=str, default='uscmamba-ablation')
     
-    parser.add_argument('--query_num', type=int, default=5,
-                        help='Query samples per class (default: 5)')
+    parser.add_argument('--query_num_train', type=int, default=1,
+                        help='Train query samples per class (default: 1)')
+    parser.add_argument('--query_num_val', type=int, default=1,
+                        help='Val query samples per class (default: 1)')
+    parser.add_argument('--query_num_test', type=int, default=1,
+                        help='Test query samples per class (default: 1)')
     parser.add_argument('--num_epochs', type=int, default=100)
-    parser.add_argument('--image_size', type=int, default=128)
+    parser.add_argument('--image_size', type=int, default=64)
     
-    parser.add_argument('--training_samples', type=str, default='30,60,150',
+    parser.add_argument('--training_samples', type=str, default='32,64,160',
                         help='Comma-separated list of training sample sizes')
     
     parser.add_argument('--dry_run', action='store_true',
@@ -287,7 +295,9 @@ def main():
         dataset_path=args.dataset_path,
         dataset_name=args.dataset_name,
         project=args.project,
-        query_num=args.query_num,
+        query_num_train=args.query_num_train,
+        query_num_val=args.query_num_val,
+        query_num_test=args.query_num_test,
         num_epochs=args.num_epochs,
         image_size=args.image_size,
         training_samples_list=training_samples,

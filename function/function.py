@@ -128,7 +128,7 @@ class CenterLoss(nn.Module):
         feat_dim (int): feature dimension.
         use_gpu (bool): use gpu or not.
     """
-    def __init__(self, num_classes=3, feat_dim=1600, use_gpu=True, device='cpu'):
+    def __init__(self, num_classes=4, feat_dim=1600, use_gpu=True, device='cpu'):
         super(CenterLoss, self).__init__()
         self.num_classes = num_classes
         self.feat_dim = feat_dim
@@ -280,7 +280,7 @@ class SiameseContrastiveLoss(nn.Module):
 SiameseLoss = SiameseContrastiveLoss
 
 
-def plot_confusion_matrix(targets, preds, num_classes=3, save_path=None, class_names=None):
+def plot_confusion_matrix(targets, preds, num_classes=4, save_path=None, class_names=None):
     """
     Plot confusion matrix (IEEE format) - saves as PDF vector.
     
@@ -291,11 +291,11 @@ def plot_confusion_matrix(targets, preds, num_classes=3, save_path=None, class_n
         preds: Predicted labels
         num_classes: Number of classes
         save_path: Path to save the figure (without extension, will add .pdf)
-        class_names: List of class names (default: ['surface', 'corona', 'nopd'])
+        class_names: List of class names (default: ['Surface', 'Internal', 'Corona', 'NotPD'])
     """
     # Default class names
     if class_names is None:
-        class_names = ['Corona', 'NotPD', 'Surface', 'Void']
+        class_names = ['Surface', 'Internal', 'Corona', 'NotPD']
     
     # IEEE format: Times New Roman, 14pt font
     plt.rcParams.update({
@@ -356,7 +356,7 @@ def plot_confusion_matrix(targets, preds, num_classes=3, save_path=None, class_n
         plt.close()
 
 
-def plot_tsne(features, labels, num_classes=3, save_path=None, class_names=None):
+def plot_tsne(features, labels, num_classes=4, save_path=None, class_names=None):
     """
     t-SNE visualization - Q1 Publication Quality (IEEE/Nature style).
     
@@ -439,7 +439,7 @@ def plot_tsne(features, labels, num_classes=3, save_path=None, class_names=None)
     fig, ax = plt.subplots(figsize=(5, 5), dpi=150)  # 5x5 inches, high DPI
     
     # Class names
-    default_class_names = ['Corona', 'NotPD', 'Surface']
+    default_class_names = ['Surface', 'Internal', 'Corona', 'NotPD']
     if class_names is None:
         class_names = default_class_names
     unique_labels = sorted(set(labels))
@@ -533,7 +533,7 @@ def plot_tsne(features, labels, num_classes=3, save_path=None, class_names=None)
     plt.close()
 
 
-def plot_umap(features, labels, num_classes=3, save_path=None, class_names=None):
+def plot_umap(features, labels, num_classes=4, save_path=None, class_names=None):
     """
     UMAP visualization - Q1 Publication Quality (IEEE/Nature style).
     
@@ -560,7 +560,7 @@ def plot_umap(features, labels, num_classes=3, save_path=None, class_names=None)
     except ImportError:
         print("UMAP not installed. Run: pip install umap-learn")
         print("Falling back to t-SNE...")
-        return plot_tsne(features, labels, num_classes, save_path, class_names, title)
+        return plot_tsne(features, labels, num_classes, save_path, class_names)
     
     # ================================================================
     # Q1 Publication Style (Nature/Science/IEEE)
@@ -610,7 +610,7 @@ def plot_umap(features, labels, num_classes=3, save_path=None, class_names=None)
     fig, ax = plt.subplots(figsize=(5, 5), dpi=150)
     
     # Class names
-    default_class_names = ['Corona', 'NotPD', 'Surface']
+    default_class_names = ['Surface', 'Internal', 'Corona', 'NotPD']
     if class_names is None:
         class_names = default_class_names
     unique_labels = sorted(set(labels))
@@ -705,7 +705,7 @@ def plot_umap(features, labels, num_classes=3, save_path=None, class_names=None)
 
 
 
-def plot_tsne_comparison(original_features, encoded_features, labels, num_classes=3, save_path=None):
+def plot_tsne_comparison(original_features, encoded_features, labels, num_classes=4, save_path=None):
     """
     t-SNE visualization comparing original (raw pixels) vs encoded features side-by-side.
     

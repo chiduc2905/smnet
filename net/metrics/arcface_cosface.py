@@ -48,7 +48,8 @@ class ArcFace(nn.Module):
         in_features: int, 
         out_features: int,
         scale: float = 30.0, 
-        margin: float = 0.5
+        margin: float = 0.5,
+        class_margins: torch.Tensor = None,
     ):
         super().__init__()
         self.in_features = in_features
@@ -67,6 +68,14 @@ class ArcFace(nn.Module):
         # Threshold for numeric stability
         self.th = math.cos(math.pi - margin)
         self.mm = math.sin(math.pi - margin) * margin
+
+        if class_margins is not None:
+            cm = torch.as_tensor(class_margins, dtype=torch.float32).view(-1)
+            if cm.numel() != out_features:
+                raise ValueError(f"class_margins size={cm.numel()} must match out_features={out_features}")
+            self.register_buffer("class_margins", cm)
+        else:
+            self.class_margins = None
     
     def forward(self, x: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
         """Compute ArcFace logits.
@@ -85,21 +94,28 @@ class ArcFace(nn.Module):
         # Cosine similarity: (B, num_classes)
         cosine = F.linear(x, W)
         
-        # Compute sin from cos
-        sine = torch.sqrt(1.0 - torch.clamp(cosine ** 2, 0, 1))
-        
-        # cos(θ + m) = cos(θ)cos(m) - sin(θ)sin(m)
-        phi = cosine * self.cos_m - sine * self.sin_m
-        
-        # Numeric stability: when cos(θ) < cos(π - m), use linear approximation
-        phi = torch.where(cosine > self.th, phi, cosine - self.mm)
-        
-        # One-hot encoding for target class
-        one_hot = torch.zeros_like(cosine)
-        one_hot.scatter_(1, labels.view(-1, 1), 1.0)
-        
-        # Apply margin ONLY to target class
-        logits = (one_hot * phi) + ((1.0 - one_hot) * cosine)
+        # Target cosine
+        idx = torch.arange(cosine.size(0), device=cosine.device)
+        target_cos = cosine[idx, labels]
+        target_sin = torch.sqrt(1.0 - torch.clamp(target_cos ** 2, 0, 1))
+
+        if self.class_margins is not None:
+            margin = self.class_margins[labels]
+            cos_m = torch.cos(margin)
+            sin_m = torch.sin(margin)
+            th = torch.cos(math.pi - margin)
+            mm = torch.sin(math.pi - margin) * margin
+        else:
+            cos_m = torch.full_like(target_cos, self.cos_m)
+            sin_m = torch.full_like(target_cos, self.sin_m)
+            th = torch.full_like(target_cos, self.th)
+            mm = torch.full_like(target_cos, self.mm)
+
+        phi_target = target_cos * cos_m - target_sin * sin_m
+        phi_target = torch.where(target_cos > th, phi_target, target_cos - mm)
+
+        logits = cosine.clone()
+        logits[idx, labels] = phi_target
         
         # Scale
         logits = logits * self.s
@@ -141,7 +157,8 @@ class CosFace(nn.Module):
         in_features: int, 
         out_features: int,
         scale: float = 30.0, 
-        margin: float = 0.35
+        margin: float = 0.35,
+        class_margins: torch.Tensor = None,
     ):
         super().__init__()
         self.in_features = in_features
@@ -152,6 +169,14 @@ class CosFace(nn.Module):
         # Classifier weights
         self.weight = nn.Parameter(torch.randn(out_features, in_features))
         nn.init.xavier_uniform_(self.weight)
+
+        if class_margins is not None:
+            cm = torch.as_tensor(class_margins, dtype=torch.float32).view(-1)
+            if cm.numel() != out_features:
+                raise ValueError(f"class_margins size={cm.numel()} must match out_features={out_features}")
+            self.register_buffer("class_margins", cm)
+        else:
+            self.class_margins = None
     
     def forward(self, x: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
         """Compute CosFace logits.
@@ -170,12 +195,12 @@ class CosFace(nn.Module):
         # Cosine similarity
         cosine = F.linear(x, W)  # (B, num_classes)
         
-        # One-hot for target class
-        one_hot = torch.zeros_like(cosine)
-        one_hot.scatter_(1, labels.view(-1, 1), 1.0)
-        
-        # Subtract margin from target class logit
-        logits = cosine - one_hot * self.m
+        logits = cosine.clone()
+        idx = torch.arange(cosine.size(0), device=cosine.device)
+        if self.class_margins is not None:
+            logits[idx, labels] = logits[idx, labels] - self.class_margins[labels]
+        else:
+            logits[idx, labels] = logits[idx, labels] - self.m
         
         # Scale
         logits = logits * self.s

@@ -44,10 +44,10 @@ def get_args():
     
     # Paths
     parser.add_argument('--dataset_path', type=str, 
-                        default='/mnt/disk2/nhatnc/res/scalogram_fewshot/proposed_model/smnet/scalogram_official')
+                        default='/mnt/disk2/nhatnc/res/scalogram_fewshot/proposed_model/smnet/scalogram_27_1')
     parser.add_argument('--path_weights', type=str, default='checkpoints/')
     parser.add_argument('--path_results', type=str, default='results/')
-    parser.add_argument('--dataset_name', type=str, default='minh')
+    parser.add_argument('--dataset_name', type=str, default='knee_aug_split')
     
     # Ablation settings
     parser.add_argument('--ablation_type', type=str, required=True,
@@ -57,10 +57,21 @@ def get_args():
                         help='Mode: dualpath=(local_only|global_only|both), others=(with|without)')
     
     # Few-shot settings
-    parser.add_argument('--way_num', type=int, default=3)
+    parser.add_argument('--way_num', type=int, default=4)
     parser.add_argument('--shot_num', type=int, default=1)
-    parser.add_argument('--query_num', type=int, default=5)
-    parser.add_argument('--image_size', type=int, default=128)
+    parser.add_argument('--query_num', type=int, default=None,
+                        help='Legacy: set same queries per class for train/val/test')
+    parser.add_argument('--query_num_train', type=int, default=1)
+    parser.add_argument('--query_num_val', type=int, default=1)
+    parser.add_argument('--query_num_test', type=int, default=1)
+    parser.add_argument('--image_size', type=int, default=64)
+    parser.add_argument('--hidden_dim', type=int, default=64)
+    parser.add_argument('--d_state', type=int, default=8)
+    parser.add_argument('--global_expand', type=int, default=2)
+    parser.add_argument('--proto_pool_size', type=int, default=12)
+    parser.add_argument('--num_prototypes', type=int, default=2)
+    parser.add_argument('--detach_prototypes', action='store_true')
+    parser.add_argument('--similarity_proj_dim', type=int, default=None)
     
     # Training
     parser.add_argument('--training_samples', type=int, default=None)
@@ -126,8 +137,15 @@ def get_model(args):
     
     model = USCMambaNet(
         in_channels=3,
+        hidden_dim=args.hidden_dim,
+        d_state=args.d_state,
+        global_expand=args.global_expand,
         temperature=args.temperature,
         cross_attn_alpha=args.cross_attn_alpha,
+        proto_pool_size=args.proto_pool_size,
+        num_prototypes=args.num_prototypes,
+        detach_prototypes=args.detach_prototypes,
+        similarity_proj_dim=args.similarity_proj_dim,
         **ablation_config
     )
     
@@ -177,7 +195,7 @@ def train_loop(net, train_X, train_y, val_X, val_y, args):
         # This ensures: (1) different episodes each epoch, (2) reproducible across experiments
         train_seed = args.seed + epoch  # Epoch 1 uses seed+1, Epoch 2 uses seed+2, etc.
         train_ds = FewshotDataset(train_X, train_y, args.episode_num_train,
-                                  args.way_num, args.shot_num, args.query_num, train_seed)
+                                  args.way_num, args.shot_num, args.query_num_train, train_seed)
         train_gen = torch.Generator()
         train_gen.manual_seed(train_seed)
         train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
@@ -233,7 +251,7 @@ def train_loop(net, train_X, train_y, val_X, val_y, args):
         train_acc = train_correct / train_total if train_total > 0 else 0
         
         val_ds = FewshotDataset(val_X, val_y, args.episode_num_val,
-                                args.way_num, args.shot_num, args.query_num, args.seed)
+                                args.way_num, args.shot_num, args.query_num_val, args.seed)
         val_loader = DataLoader(val_ds, batch_size=1, shuffle=False)
         
         val_acc, val_loss = evaluate(net, val_loader, args, criterion_main)
@@ -389,6 +407,11 @@ def test_final(net, loader, args):
 def main():
     args = get_args()
     args.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+    if args.query_num is not None:
+        args.query_num_train = args.query_num
+        args.query_num_val = args.query_num
+        args.query_num_test = args.query_num
     
     print(f"\n{'='*60}")
     print(f"USCMambaNet Ablation: {args.ablation_type} - {args.ablation_mode}")
@@ -424,9 +447,20 @@ def main():
     train_X, train_y = to_tensor(dataset.X_train, dataset.y_train)
     val_X, val_y = to_tensor(dataset.X_val, dataset.y_val)
     test_X, test_y = to_tensor(dataset.X_test, dataset.y_test)
+
+    dataset_classes = list(getattr(dataset, 'classes', []))
+    if dataset_classes and args.way_num != len(dataset_classes):
+        print(f"ℹ️ way_num={args.way_num} does not match dataset classes={len(dataset_classes)}. "
+              f"Using way_num={len(dataset_classes)}.")
+        args.way_num = len(dataset_classes)
     
     # Limit training samples
     if args.training_samples:
+        if args.training_samples % args.way_num != 0:
+            raise ValueError(
+                f"training_samples ({args.training_samples}) must be divisible by way_num ({args.way_num}) "
+                "for balanced class sampling."
+            )
         per_class = args.training_samples // args.way_num
         X_list, y_list = [], []
         
@@ -448,7 +482,7 @@ def main():
     # This ensures different episodes each epoch but reproducible across experiments
     
     test_ds = FewshotDataset(test_X, test_y, args.episode_num_test,
-                             args.way_num, args.shot_num, args.query_num, args.seed)
+                             args.way_num, args.shot_num, args.query_num_test, args.seed)
     test_loader = DataLoader(test_ds, batch_size=1, shuffle=False)
     
     # Initialize Model
