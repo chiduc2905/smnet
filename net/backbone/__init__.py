@@ -16,6 +16,7 @@ from .dual_branch_fusion import DualBranchFusion, LocalMidBranch, GlobalSS2DBran
 from .feature_extractor import PatchEmbed2D, PatchMerging2D, SpatialDownsample
 from .unified_attention import UnifiedSpatialChannelAttention
 from .late_attention_bridge import LateSingleHeadAttentionBridge
+from .conv64f import Conv64FBackbone, Conv64FBlock
 
 __all__ = [
     # Legacy modules (still available)
@@ -36,4 +37,7 @@ __all__ = [
     'UnifiedSpatialChannelAttention',
     # M5: Late attention bridge
     'LateSingleHeadAttentionBridge',
+    # Conv64F backbone for benchmark models
+    'Conv64FBackbone',
+    'Conv64FBlock',
 ]

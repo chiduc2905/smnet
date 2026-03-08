@@ -1,11 +1,4 @@
-"""USCMambaNet (Unified Spatial-Channel Mamba Network) - Training and Evaluation.
-
-This script trains and evaluates USCMambaNet which uses:
-- PatchEmbed + PatchMerging for hierarchical feature extraction
-- DualBranchFusion (AG-LKA + SS2D) for local-global features
-- UnifiedSpatialChannelAttention for feature selection
-- SimplePatchSimilarity for non-learnable cosine matching
-"""
+"""Few-shot benchmark training and evaluation entrypoint."""
 import os
 import csv
 import argparse
@@ -29,16 +22,9 @@ except ImportError:
     THOP_AVAILABLE = False
     print("Warning: thop not installed. Run 'pip install thop' for FLOPs calculation.")
 
-from dataset import load_dataset
 from dataloader.dataloader import FewshotDataset
-from function.function import (
-    seed_func,
-    plot_confusion_matrix, plot_tsne, plot_umap, plot_training_curves
-)
 from function.debug_utils import print_grad_norm, print_logit_stats, set_debug_mode, is_debug_mode
-
-# Model
-from net.usc_mamba_net import USCMambaNet
+from net.model_factory import build_model_from_args, get_model_choices, get_model_metadata
 
 
 # =============================================================================
@@ -47,7 +33,7 @@ from net.usc_mamba_net import USCMambaNet
 
 def get_args():
     """Parse command line arguments."""
-    parser = argparse.ArgumentParser(description='USCMambaNet Few-shot Learning')
+    parser = argparse.ArgumentParser(description='Few-shot Learning Benchmark')
     
     # Paths
     parser.add_argument('--dataset_path', type=str,
@@ -60,11 +46,20 @@ def get_args():
     
     # Model
     parser.add_argument('--model', type=str, default='uscmamba', 
-                        choices=['uscmamba'])
+                        choices=get_model_choices())
     parser.add_argument('--hidden_dim', type=int, default=64,
                         help='Hidden dimension for feature extractor')
+    parser.add_argument('--token_dim', type=int, default=None,
+                        help='Token projection dimension for Conv64F token/SSM models (default: hidden_dim)')
+    parser.add_argument('--conv64f_pool_last', type=str, default='true',
+                        choices=['true', 'false'],
+                        help='Pool in the final Conv64F block for new benchmark models')
     parser.add_argument('--d_state', type=int, default=8,
                         help='Mamba/VSS state dimension')
+    parser.add_argument('--ssm_state_dim', type=int, default=16,
+                        help='Internal selective-scan state dimension for new Conv64F SSM models')
+    parser.add_argument('--ssm_depth', type=int, default=1,
+                        help='Number of write/read SSM layers for class-memory models')
     parser.add_argument('--global_expand', type=int, default=2,
                         help='Expansion factor for global VSS branch')
     parser.add_argument('--proto_pool_size', type=int, default=12,
@@ -75,6 +70,47 @@ def get_args():
                         help='Deprecated (cross-attention disabled)')
     parser.add_argument('--similarity_proj_dim', type=int, default=None,
                         help='Projection dim for similarity head (default: hidden_dim)')
+    parser.add_argument('--use_sw', type=str, default='true',
+                        choices=['true', 'false'],
+                        help='Enable SW metric/alignment components in the new architectures')
+    parser.add_argument('--sw_weight', type=float, default=0.25,
+                        help='Weight for SW auxiliary/additive score in the new architectures')
+    parser.add_argument('--sw_num_projections', type=int, default=64,
+                        help='Number of random projections for sliced Wasserstein distance')
+    parser.add_argument('--sw_p', type=float, default=2.0,
+                        help='Power used inside sliced Wasserstein distance')
+    parser.add_argument('--sw_normalize', type=str, default='true',
+                        choices=['true', 'false'],
+                        help='L2-normalize token features before SW distance')
+    parser.add_argument('--token_merge_mode', type=str, default='concat',
+                        choices=['concat', 'mean'],
+                        help='How to merge support tokens class-wise for token metrics')
+    parser.add_argument('--token_metric_mode', type=str, default='token_only',
+                        choices=['token_only', 'token_plus_global'],
+                        help='Conv64FTokenSWMetricNet scoring mode')
+    parser.add_argument('--global_metric', type=str, default='cosine',
+                        choices=['cosine', 'sqeuclidean'],
+                        help='Global pooled feature metric when token_plus_global is used')
+    parser.add_argument('--global_metric_weight', type=float, default=1.0,
+                        help='Weight for the pooled global distance component')
+    parser.add_argument('--use_role_embedding', type=str, default='true',
+                        choices=['true', 'false'],
+                        help='Use episodic role/phase embeddings in role-aware scan models')
+    parser.add_argument('--use_boundary_gate', type=str, default='true',
+                        choices=['true', 'false'],
+                        help='Use boundary-aware carry gating in episodic scan models')
+    parser.add_argument('--max_episode_positions', type=int, default=32,
+                        help='Maximum episodic positions for role-aware embeddings')
+    parser.add_argument('--max_way_num', type=int, default=32,
+                        help='Maximum number of classes supported by episodic role embeddings')
+    parser.add_argument('--num_support_permutations', type=int, default=3,
+                        help='Number of support-set permutations for permutation-robust memory scanning')
+    parser.add_argument('--permutation_consistency_weight', type=float, default=0.1,
+                        help='Class-specific penalty strength for unstable permutation memories')
+    parser.add_argument('--hierarchical_token_depth', type=int, default=1,
+                        help='Token-level SSM depth in HierarchicalEpisodicSSMNet')
+    parser.add_argument('--hierarchical_shot_depth', type=int, default=1,
+                        help='Shot-level SSM depth in HierarchicalEpisodicSSMNet')
     
     # Few-shot settings
     parser.add_argument('--way_num', type=int, default=4)
@@ -200,71 +236,48 @@ def get_args():
 
 def get_model(args):
     """Initialize model based on args."""
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    
-    # Convert string args to boolean for ablation flags
-    use_unified = args.use_unified_attention.lower() == 'true'
-    use_cross = args.use_cross_attention.lower() == 'true'
-    use_pair_expert = args.use_pair_expert.lower() == 'true'
-    use_ms_global = args.use_ms_global.lower() == 'true'
-    use_late_attention = args.use_late_attention.lower() == 'true'
-    use_axis_proto = args.use_axis_proto.lower() == 'true'
-
-    # Cross-attention is removed from the active architecture.
-    if use_cross:
-        print("Info: --use_cross_attention=true requested, but cross-attention is disabled in current model.")
-    use_cross = False
-    if not use_cross:
-        use_axis_proto = False
-
-    axis_mix_parts = [p.strip() for p in args.axis_proto_mix_init.split(',')]
-    if len(axis_mix_parts) != 3:
-        raise ValueError("--axis_proto_mix_init must have exactly 3 comma-separated values")
-    axis_proto_mix_init = tuple(float(v) for v in axis_mix_parts)
-    
-    model = USCMambaNet(
-        in_channels=3,  # RGB input
-        hidden_dim=args.hidden_dim,
-        d_state=args.d_state,
-        global_expand=args.global_expand,
-        temperature=args.temperature,
-        beta_maha=args.beta_maha,
-        uaps_eps=args.uaps_eps,
-        cross_attn_alpha=args.cross_attn_alpha,
-        proto_pool_size=args.proto_pool_size,
-        num_prototypes=args.num_prototypes,
-        detach_prototypes=args.detach_prototypes,
-        use_axis_proto=use_axis_proto,
-        axis_proto_pool=args.axis_proto_pool,
-        axis_proto_mix_init=axis_proto_mix_init,
-        use_late_attention=use_late_attention,
-        late_attn_window=args.late_attn_window,
-        late_attn_dropout=args.late_attn_dropout,
-        similarity_proj_dim=args.similarity_proj_dim,
-        delta_lambda=args.delta_lambda,
-        way_num=args.way_num,
-        use_pair_expert=use_pair_expert,
-        use_ms_global=use_ms_global,
-        ms_downsample=args.ms_downsample,
-        atrous_rate=args.atrous_rate,
-        use_projection=not args.no_projection,
-        dualpath_mode=args.dualpath_mode,
-        use_unified_attention=use_unified,
-        use_cross_attention=use_cross,
-        device=str(device)
-    )
-    
-    # Print ablation config
+    model = build_model_from_args(args)
+    meta = get_model_metadata(args.model)
     print(f"\nModel Config:")
-    print(f"  dualpath_mode: {args.dualpath_mode}")
-    print(f"  use_unified_attention: {use_unified}")
-    print(f"  use_cross_attention: {use_cross}")
-    print(f"  use_ms_global: {use_ms_global} (downsample={args.ms_downsample}, atrous={args.atrous_rate})")
-    print(f"  use_late_attention: {use_late_attention} (window={args.late_attn_window})")
-    print(f"  use_axis_proto: {use_axis_proto} ({args.axis_proto_pool}, mix={axis_proto_mix_init})")
-    print(f"  use_pair_expert: {use_pair_expert}")
-    
-    return model.to(device)
+    print(f"  model: {meta['display_name']}")
+    if args.model == 'uscmamba':
+        use_unified = args.use_unified_attention.lower() == 'true'
+        use_cross = False
+        use_pair_expert = args.use_pair_expert.lower() == 'true'
+        use_ms_global = args.use_ms_global.lower() == 'true'
+        use_late_attention = args.use_late_attention.lower() == 'true'
+        use_axis_proto = False
+        print(f"  dualpath_mode: {args.dualpath_mode}")
+        print(f"  use_unified_attention: {use_unified}")
+        print(f"  use_cross_attention: {use_cross}")
+        print(f"  use_ms_global: {use_ms_global} (downsample={args.ms_downsample}, atrous={args.atrous_rate})")
+        print(f"  use_late_attention: {use_late_attention} (window={args.late_attn_window})")
+        print(f"  use_axis_proto: {use_axis_proto} ({args.axis_proto_pool}, mix={args.axis_proto_mix_init})")
+        print(f"  use_pair_expert: {use_pair_expert}")
+    else:
+        print(f"  conv64f_pool_last: {args.conv64f_pool_last}")
+        print(f"  token_dim: {args.token_dim if args.token_dim is not None else args.hidden_dim}")
+        print(f"  use_sw: {args.use_sw} (weight={args.sw_weight}, projections={args.sw_num_projections})")
+        print(f"  token_merge_mode: {args.token_merge_mode}")
+        if args.model == 'conv64f_token_sw_metric_net':
+            print(f"  token_metric_mode: {args.token_metric_mode}")
+            print(f"  global_metric: {args.global_metric} (weight={args.global_metric_weight})")
+        if args.model in {'class_memory_scan_mamba_net', 'permutation_robust_class_memory_mamba_net'}:
+            print(f"  ssm_state_dim: {args.ssm_state_dim} (depth={args.ssm_depth})")
+        if args.model == 'episodic_selective_scan_mamba_net':
+            print(f"  ssm_state_dim: {args.ssm_state_dim}")
+            print(f"  role_embedding: {args.use_role_embedding}, boundary_gate: {args.use_boundary_gate}")
+        if args.model == 'permutation_robust_class_memory_mamba_net':
+            print(
+                f"  support_permutations: {args.num_support_permutations} "
+                f"(consistency_weight={args.permutation_consistency_weight})"
+            )
+        if args.model == 'hierarchical_episodic_ssm_net':
+            print(
+                f"  hierarchical_depth: token={args.hierarchical_token_depth}, "
+                f"shot={args.hierarchical_shot_depth}"
+            )
+    return model
 
 
 # =============================================================================
@@ -274,6 +287,8 @@ def get_model(args):
 
 def train_loop(net, train_X, train_y, val_X, val_y, args):
     """Train with pure CE objective (architecture-focused protocol)."""
+    from function.function import plot_training_curves
+
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     optimizer = optim.AdamW(net.parameters(), lr=args.lr, weight_decay=args.weight_decay)
@@ -473,16 +488,18 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
     """Final evaluation with detailed metrics.
     
     Args:
-        test_X: Full test set for visualization (to avoid duplicate samples in t-SNE/UMAP)
+        test_X: Full test set for visualization (to avoid duplicate samples in t-SNE)
         test_y: Full test labels
     """
     import time
+    from function.function import plot_confusion_matrix, plot_tsne
     
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     num_episodes = len(loader)
     
+    meta = get_model_metadata(args.model)
     print(f"\n{'='*60}")
-    print(f"Final Test: USCMambaNet | {args.dataset_name} | {args.shot_num}-shot")
+    print(f"Final Test: {meta['display_name']} | {args.dataset_name} | {args.shot_num}-shot")
     print(f"{num_episodes} episodes × {args.way_num} classes × {args.query_num_test} query")
     print('='*60)
     
@@ -680,7 +697,7 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
         print(f"Saved per-file misclassification report: {mis_path}")
     
     # ====================================================================
-    # t-SNE/UMAP: Use UNIQUE test samples (not episode duplicates!)
+    # t-SNE: Use UNIQUE test samples (not episode duplicates!)
     # ====================================================================
     # Problem with old approach:
     # - 300 episodes × 15 queries = 4500 samples
@@ -692,7 +709,7 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
     
     if test_X is not None and test_y is not None:
         print(f"\n{'='*60}")
-        print(f"Extracting features for t-SNE/UMAP from UNIQUE test samples")
+        print(f"Extracting features for t-SNE from UNIQUE test samples")
         print(f"Test set size: {len(test_X)} samples ({len(test_X)//args.way_num}/class)")
         print('='*60)
         
@@ -708,9 +725,12 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
             for i in range(0, len(test_X), batch_size):
                 batch_X = test_X_device[i:i+batch_size]
                 
-                # Extract backbone features (same as in episodes)
-                features = net.encode(batch_X)  # (N, hidden_dim, H', W')
-                feat_backbone = features.mean(dim=(2, 3))  # GAP: (N, hidden_dim)
+                # Use the model's public feature-extraction path for visualization.
+                if hasattr(net, "extract_features"):
+                    feat_backbone = net.extract_features(batch_X)  # (N, hidden_dim)
+                else:
+                    features = net.encode(batch_X)  # (N, hidden_dim, H', W')
+                    feat_backbone = features.mean(dim=(2, 3))  # GAP: (N, hidden_dim)
                 feat_backbone = F.normalize(feat_backbone, p=2, dim=-1)  # L2 normalize
                 
                 all_features.append(feat_backbone.cpu().numpy())
@@ -726,23 +746,16 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
             
             if os.path.exists(f"{tsne_path}_tsne.png"):
                 wandb.log({"tsne_plot": wandb.Image(f"{tsne_path}_tsne.png")})
-    
-            # 2. UMAP
-            umap_path = os.path.join(args.path_results, 
-                                     f"umap_{args.dataset_name}_{args.model}_{samples_str.strip('_')}_{args.shot_num}shot")
-            plot_umap(features, test_y_np, args.way_num, umap_path, class_names=args.class_names)
-            
-            if os.path.exists(f"{umap_path}_umap.png"):
-                wandb.log({"umap_plot": wandb.Image(f"{umap_path}_umap.png")})
     else:
-        print("\n⚠️  Warning: test_X/test_y not provided, skipping t-SNE/UMAP (would have duplicates)")
+        print("\n⚠️  Warning: test_X/test_y not provided, skipping t-SNE (would have duplicates)")
     
     
     # Save results to file
     txt_path = os.path.join(args.path_results, 
                             f"results_{args.dataset_name}_{args.model}_{samples_str.strip('_')}_{args.shot_num}shot.txt")
     with open(txt_path, 'w') as f:
-        f.write(f"Model: SMNet ({args.model})\n")
+        meta = get_model_metadata(args.model)
+        f.write(f"Model: {meta['display_name']} ({args.model})\n")
         f.write(f"Dataset: {args.dataset_name}\n")
         f.write(f"Shot: {args.shot_num}\n")
         f.write(f"Training Samples: {args.training_samples if args.training_samples else 'All'}\n")
@@ -764,6 +777,8 @@ def test_final(net, loader, args, test_X=None, test_y=None, test_file_paths=None
 def main():
     args = get_args()
     args.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    model_meta = get_model_metadata(args.model)
+    from function.function import seed_func
 
     # Legacy compatibility: one query_num for all splits
     if args.query_num is not None:
@@ -772,20 +787,20 @@ def main():
         args.query_num_test = args.query_num
     
     print(f"\n{'='*60}")
-    print("USCMambaNet: Unified Spatial-Channel Mamba Network")
+    print(model_meta['display_name'])
     print('='*60)
     print(f"Config: {args.model} | {args.shot_num}-shot | {args.num_epochs} epochs | Device: {args.device}")
-    print(f"Architecture: PatchEmbed → ConvBlocks → PatchMerge → DualBranch(AG-LKA+SS2D) → UnifiedAttn → SimpleSimilarity")
+    print(f"Architecture: {model_meta['architecture']}")
     print(f"Dataset: {args.dataset_path}")
     
     # Initialize WandB
     samples_str = f"{args.training_samples}samples" if args.training_samples else "all"
-    run_name = f"uscmamba_{args.dataset_name}_{samples_str}_{args.shot_num}shot"
+    run_name = f"{args.model}_{args.dataset_name}_{samples_str}_{args.shot_num}shot"
     
     config = vars(args).copy()
-    config['architecture'] = 'USCMambaNet (Unified Spatial-Channel Mamba Network)'
+    config['architecture'] = model_meta['architecture']
     
-    wandb.init(project=args.project, config=config, name=run_name, group=f"uscmamba_{args.dataset_name}", job_type=args.mode)
+    wandb.init(project=args.project, config=config, name=run_name, group=f"{args.model}_{args.dataset_name}", job_type=args.mode)
     
     # Set seed BEFORE anything else for full reproducibility
     seed_func(args.seed)
@@ -795,6 +810,9 @@ def main():
     os.makedirs(args.path_weights, exist_ok=True)
     os.makedirs(args.path_results, exist_ok=True)
     
+    # Load dataset lazily so CLI help does not depend on training extras.
+    from dataset import load_dataset
+
     # Load dataset
     dataset = load_dataset(args.dataset_path, image_size=args.image_size)
     

@@ -4,6 +4,8 @@ import sys
 import argparse
 import os
 
+from net.model_factory import get_model_choices, get_model_metadata
+
 def get_args():
     parser = argparse.ArgumentParser(description='Run all USCMambaNet experiments')
     parser.add_argument('--project', type=str, default='uscmamba', help='WandB project name')
@@ -16,6 +18,8 @@ def get_args():
                         help='Optional fixed shot number. If omitted, run both 1-shot and 5-shot.')
     parser.add_argument('--mode_id', type=int, default=None, choices=list(range(1, 5)),
                         help='Run specific experiment (1-4). If not set, runs all experiments.')
+    parser.add_argument('--models', type=str, default='uscmamba',
+                        help='Comma-separated model registry names to run (default: uscmamba)')
     return parser.parse_args()
 
 
@@ -40,10 +44,6 @@ SHOTS_DEFAULT = [1, 5]
 # Query samples
 TRAIN_QUERY_NUM = 1
 EVAL_QUERY_NUM = 1
-
-# Model variants
-MODELS = ['uscmamba']
-
 
 def run_experiment(model, shot, samples, dataset_path, dataset_name, project, seed):
     """Run a single SMNet experiment."""
@@ -112,6 +112,11 @@ def run_experiment(model, shot, samples, dataset_path, dataset_name, project, se
 def main():
     args = get_args()
     shots = [args.shot_num] if args.shot_num is not None else SHOTS_DEFAULT
+    requested_models = [m.strip() for m in args.models.split(',') if m.strip()]
+    valid_models = set(get_model_choices())
+    invalid_models = [m for m in requested_models if m not in valid_models]
+    if invalid_models:
+        raise ValueError(f"Unsupported models: {invalid_models}. Valid choices: {sorted(valid_models)}")
     
     # Create directories
     os.makedirs('checkpoints', exist_ok=True)
@@ -121,11 +126,12 @@ def main():
     if args.mode_id is not None:
         # Run experiment(s) for a single sample mode
         samples = EXPERIMENT_MODES[args.mode_id]
-        experiments = [('uscmamba', samples, shot) for shot in shots]
+        experiments = [(model, samples, shot) for model in requested_models for shot in shots]
         print("=" * 60)
         print(f"USCMambaNet - Single Experiment (Mode {args.mode_id})")
         print("=" * 60)
         print(f"  Samples: {samples if samples else 'All'}")
+        print(f"  Model(s): {', '.join(requested_models)}")
         print(f"  Shot(s): {', '.join(map(str, shots))}")
         print(f"  Dataset: {args.dataset_path}")
         print("=" * 60)
@@ -133,7 +139,7 @@ def main():
         # Run all experiments
         experiments = [
             (model, samples, shot)
-            for model in MODELS
+            for model in requested_models
             for samples in SAMPLES_LIST
             for shot in shots
         ]
@@ -143,6 +149,7 @@ def main():
         print("Mode mapping:")
         for mid, s in EXPERIMENT_MODES.items():
             print(f"  Mode {mid}: {s if s else 'All'} samples")
+        print(f"Models: {', '.join(requested_models)}")
         print(f"Shots: {', '.join(f'{s}-shot' for s in shots)}")
         print(f"Dataset: {args.dataset_path} ({args.dataset_name})")
         print(f"Total experiments: {len(experiments)}")
@@ -168,7 +175,7 @@ def main():
         if success:
             success_count += 1
         else:
-            failed_experiments.append(f"uscmamba_{shot}shot_{samples if samples else 'all'}samples")
+            failed_experiments.append(f"{model}_{shot}shot_{samples if samples else 'all'}samples")
     
     # Summary
     print("\n" + "=" * 60)
@@ -188,12 +195,12 @@ def main():
     print("="*60)
     
     # Generate comparison after all experiments
-    generate_comparison_charts(args.dataset_name, shots)
+    generate_comparison_charts(args.dataset_name, shots, requested_models)
     
     print("\nAll experiments completed!")
 
 
-def generate_comparison_charts(dataset_name, shots):
+def generate_comparison_charts(dataset_name, shots, models):
     """Generate comparison bar charts from results."""
     import re
     try:
@@ -206,9 +213,8 @@ def generate_comparison_charts(dataset_name, shots):
     
     # Model display names
     model_display_names = {
-        'uscmamba': 'USCMambaNet',
-        'smnet': 'SMNet',
-        'smnet_light': 'SMNet-Light'
+        model_name: get_model_metadata(model_name)["display_name"]
+        for model_name in models
     }
     
     for samples in SAMPLES_LIST:
@@ -216,7 +222,7 @@ def generate_comparison_charts(dataset_name, shots):
         
         model_results = {}
         
-        for model in MODELS:
+        for model in models:
             display_name = model_display_names.get(model, model)
             model_results[display_name] = {}
             

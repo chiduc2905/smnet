@@ -22,6 +22,11 @@ from .class_conditional_cosine import (
 )
 from .hybrid_similarity_head import CosineSimilarityHead
 from .prototype_cross_attention import PrototypeCrossAttention
+from .sliced_wasserstein import (
+    SlicedWassersteinDistance,
+    prepare_token_distribution,
+    merge_support_tokens_by_class,
+)
 
 __all__ = [
     # Distance/Similarity functions
@@ -47,4 +52,8 @@ __all__ = [
     # USCMambaNet components
     'CosineSimilarityHead',
     'PrototypeCrossAttention',
+    # Sliced Wasserstein
+    'SlicedWassersteinDistance',
+    'prepare_token_distribution',
+    'merge_support_tokens_by_class',
 ]
