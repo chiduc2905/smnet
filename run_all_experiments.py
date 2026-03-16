@@ -20,6 +20,7 @@ def get_args():
                         help='Run specific experiment (1-4). If not set, runs all experiments.')
     parser.add_argument('--models', type=str, default='uscmamba',
                         help='Comma-separated model registry names to run (default: uscmamba)')
+    parser.add_argument('--gpu_id', type=int, default=0, help='CUDA device id to pass through')
     return parser.parse_args()
 
 
@@ -45,7 +46,7 @@ SHOTS_DEFAULT = [1, 5]
 TRAIN_QUERY_NUM = 1
 EVAL_QUERY_NUM = 1
 
-def run_experiment(model, shot, samples, dataset_path, dataset_name, project, seed):
+def run_experiment(model, shot, samples, dataset_path, dataset_name, project, seed, gpu_id):
     """Run a single SMNet experiment."""
     print(f"\n{'='*60}")
     print(f"Model={model}, Shot={shot}, Samples={samples if samples else 'All'}")
@@ -65,23 +66,18 @@ def run_experiment(model, shot, samples, dataset_path, dataset_name, project, se
         '--dataset_path', dataset_path,
         '--dataset_name', dataset_name,
         '--num_epochs', '100',
-        '--lr', '1e-3',
-        '--eta_min', '1e-5',
-        '--weight_decay', '5e-4',  # Increased from 1e-4 for better regularization
-        '--temperature', '16.0',  # Cosine similarity temperature
+        '--lr', '5e-4',
+        '--step_size', '10',
+        '--gamma', '0.5',
+        '--weight_decay', '5e-4',
+        '--temperature', '16.0',
         '--beta_maha', '0.25',
         '--uaps_eps', '1e-4',
-        '--cross_attn_alpha', '0.3',  # Prototype Cross-Attention residual weight
-        '--delta_lambda', '0.35',  # Relation delta correction weight
-        '--grad_clip', '2.0',  # Gradient clipping
-        '--margin_type', 'none',
-        '--lambda_margin', '0.0',
-        '--lambda_center', '0.0',
-        '--lambda_pair', '0.0',
+        '--cross_attn_alpha', '0.3',
+        '--delta_lambda', '0.35',
+        '--grad_clip', '2.0',
         '--use_pair_expert', 'false',
-        '--lambda_pair_expert', '0.0',
-        '--hard_mining_ratio', '0.0',
-        '--use_unified_attention', 'false',  # late_only stack
+        '--use_unified_attention', 'false',
         '--use_ms_global', 'true',
         '--ms_downsample', '2',
         '--atrous_rate', '2',
@@ -95,7 +91,8 @@ def run_experiment(model, shot, samples, dataset_path, dataset_name, project, se
         '--episode_num_train', '200',
         '--episode_num_val', '300',
         '--episode_num_test', '300',
-        '--seed', str(seed),  # Fixed seed for reproducibility
+        '--seed', str(seed),
+        '--gpu_id', str(gpu_id),
     ]
     
     if samples is not None:
@@ -169,7 +166,8 @@ def main():
             dataset_path=args.dataset_path,
             dataset_name=args.dataset_name,
             project=args.project,
-            seed=args.seed
+            seed=args.seed,
+            gpu_id=args.gpu_id,
         )
         
         if success:

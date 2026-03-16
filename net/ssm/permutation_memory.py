@@ -46,10 +46,12 @@ class PermutationConsistentMemoryEncoder(nn.Module):
         self,
         memory_writer: ClassMemoryWriteSSM,
         permutation_sampler: SupportPermutationSampler,
+        eps: float = 1e-6,
     ) -> None:
         super().__init__()
         self.memory_writer = memory_writer
         self.permutation_sampler = permutation_sampler
+        self.eps = eps
 
     def forward(
         self,
@@ -75,6 +77,10 @@ class PermutationConsistentMemoryEncoder(nn.Module):
 
         memory_stack = torch.stack(memories, dim=0)
         memory_mean = memory_stack.mean(dim=0)
-        dispersion = memory_stack.var(dim=0, unbiased=False).mean().sqrt()
+        if memory_stack.shape[0] == 1:
+            dispersion = memory_stack.new_zeros(())
+        else:
+            variance = memory_stack.var(dim=0, unbiased=False).mean()
+            dispersion = torch.sqrt(variance.clamp_min(self.eps))
         trajectory_stack = torch.stack(trajectories, dim=0).mean(dim=0)
         return memory_mean, dispersion, trajectory_stack

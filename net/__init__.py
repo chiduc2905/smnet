@@ -12,6 +12,8 @@ from .class_memory_scan_mamba_net import ClassMemoryScanMambaNet
 from .episodic_selective_scan_mamba_net import EpisodicSelectiveScanMambaNet
 from .permutation_robust_class_memory_mamba_net import PermutationRobustClassMemoryMambaNet
 from .hierarchical_episodic_ssm_net import HierarchicalEpisodicSSMNet
+from .transport_evidence_mamba_net import TransportEvidenceMambaNet
+from .transport_prior_replay_mamba_net import TransportPriorReplayMambaNet
 from .model_factory import MODEL_REGISTRY, MODEL_METADATA, build_model_from_args, get_model_choices
 
 __all__ = [
@@ -24,6 +26,8 @@ __all__ = [
     'EpisodicSelectiveScanMambaNet',
     'PermutationRobustClassMemoryMambaNet',
     'HierarchicalEpisodicSSMNet',
+    'TransportEvidenceMambaNet',
+    'TransportPriorReplayMambaNet',
     'MODEL_REGISTRY',
     'MODEL_METADATA',
     'build_model_from_args',

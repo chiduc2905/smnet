@@ -5,12 +5,29 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
-import matplotlib.pyplot as plt
-import seaborn as sns
 from sklearn.metrics import confusion_matrix
-from sklearn.manifold import TSNE
-from sklearn.preprocessing import StandardScaler
-from sklearn.decomposition import PCA
+
+try:
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    from sklearn.manifold import TSNE
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.decomposition import PCA
+    PLOTTING_AVAILABLE = True
+except ImportError:
+    plt = None
+    sns = None
+    TSNE = None
+    StandardScaler = None
+    PCA = None
+    PLOTTING_AVAILABLE = False
+
+
+def _require_plotting(func_name):
+    if not PLOTTING_AVAILABLE:
+        raise RuntimeError(
+            f"{func_name} requires matplotlib/seaborn/scikit-learn plotting dependencies."
+        )
 
 
 def seed_func(seed=42):
@@ -293,6 +310,8 @@ def plot_confusion_matrix(targets, preds, num_classes=4, save_path=None, class_n
         save_path: Path to save the figure (without extension, will add .pdf)
         class_names: List of class names (default: ['Surface', 'Internal', 'Corona', 'NotPD'])
     """
+    _require_plotting("plot_confusion_matrix")
+
     # Default class names
     if class_names is None:
         class_names = ['Surface', 'Internal', 'Corona', 'NotPD']
@@ -373,6 +392,8 @@ def plot_tsne(features, labels, num_classes=4, save_path=None, class_names=None)
         class_names: List of class names (if None, uses default)
         title: Optional title for the plot
     """
+    _require_plotting("plot_tsne")
+
     # ================================================================
     # Q1 Publication Style (Nature/Science/IEEE)
     # ================================================================
@@ -538,6 +559,7 @@ def plot_tsne_comparison(original_features, encoded_features, labels, num_classe
         num_classes: Number of classes
         save_path: Path to save the figure
     """
+    _require_plotting("plot_tsne_comparison")
     plt.rcParams.update({'font.size': 14, 'font.family': 'serif'})
     
     n = len(labels)
@@ -622,6 +644,8 @@ def plot_model_comparison_bar(model_results, training_samples, save_path=None):
     Returns:
         fig: matplotlib figure object
     """
+    _require_plotting("plot_model_comparison_bar")
+
     # Set font properties
     plt.rcParams.update({'font.size': 14, 'font.family': 'serif'})
     
@@ -691,6 +715,8 @@ def plot_training_curves(history, save_path=None):
     Returns:
         fig: matplotlib figure object
     """
+    _require_plotting("plot_training_curves")
+
     # IEEE format fonts
     plt.rcParams.update({
         'font.family': 'serif',

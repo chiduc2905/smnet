@@ -11,6 +11,8 @@ from net.conv64f_token_sw_metric_net import Conv64FTokenSWMetricNet
 from net.episodic_selective_scan_mamba_net import EpisodicSelectiveScanMambaNet
 from net.hierarchical_episodic_ssm_net import HierarchicalEpisodicSSMNet
 from net.permutation_robust_class_memory_mamba_net import PermutationRobustClassMemoryMambaNet
+from net.transport_evidence_mamba_net import TransportEvidenceMambaNet
+from net.transport_prior_replay_mamba_net import TransportPriorReplayMambaNet
 from net.usc_mamba_net import USCMambaNet
 
 
@@ -41,7 +43,7 @@ def _axis_proto_mix_init(value: object) -> tuple[float, float, float]:
 
 def build_uscmamba_from_args(args) -> USCMambaNet:
     """Build the existing baseline without changing its behavior."""
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device(_device_string(args))
     use_unified = _bool_flag(getattr(args, "use_unified_attention", "false"))
     use_cross = _bool_flag(getattr(args, "use_cross_attention", "false"))
     use_pair_expert = _bool_flag(getattr(args, "use_pair_expert", "false"))
@@ -188,6 +190,52 @@ def build_hierarchical_episodic_ssm_net_from_args(args) -> HierarchicalEpisodicS
     ).to(_device_string(args))
 
 
+def build_transport_prior_replay_mamba_net_from_args(args) -> TransportPriorReplayMambaNet:
+    return TransportPriorReplayMambaNet(
+        in_channels=3,
+        hidden_dim=args.hidden_dim,
+        token_dim=getattr(args, "token_dim", None),
+        ssm_state_dim=args.ssm_state_dim,
+        temperature=args.temperature,
+        conv64f_pool_last=_bool_flag(getattr(args, "conv64f_pool_last", "true"), default=True),
+        num_support_atoms=int(getattr(args, "num_support_atoms", 4)),
+        num_prior_atoms=int(getattr(args, "num_prior_atoms", 4)),
+        prior_bank_size=int(getattr(args, "prior_bank_size", 16)),
+        prior_bank_atoms_per_entry=int(getattr(args, "prior_bank_atoms_per_entry", 4)),
+        prior_bank_topk=int(getattr(args, "prior_bank_topk", 4)),
+        sw_num_projections=args.sw_num_projections,
+        sw_p=args.sw_p,
+        trajectory_transport_weight=float(getattr(args, "trajectory_transport_weight", 8.0)),
+        confidence_logit_weight=float(getattr(args, "confidence_logit_weight", 0.5)),
+    ).to(_device_string(args))
+
+
+def build_transport_evidence_mamba_net_from_args(args) -> TransportEvidenceMambaNet:
+    return TransportEvidenceMambaNet(
+        in_channels=3,
+        hidden_dim=args.hidden_dim,
+        token_dim=getattr(args, "token_dim", None),
+        evidence_dim=getattr(args, "tem_evidence_dim", None),
+        ssm_state_dim=args.ssm_state_dim,
+        ssm_depth=args.ssm_depth,
+        temperature=args.temperature,
+        conv64f_pool_last=_bool_flag(getattr(args, "conv64f_pool_last", "true"), default=True),
+        sw_num_projections=args.sw_num_projections,
+        sw_p=args.sw_p,
+        sw_normalize=_bool_flag(getattr(args, "sw_normalize", "true"), default=True),
+        use_transport_metrics=_bool_flag(getattr(args, "use_sw", "true"), default=True),
+        token_merge_mode=args.token_merge_mode,
+        serialization_orders=getattr(
+            args,
+            "tem_serialization_orders",
+            "row_major,row_major_reverse,column_major,column_major_reverse",
+        ),
+        use_delta=_bool_flag(getattr(args, "tem_use_delta", "true"), default=True),
+        use_support_context=_bool_flag(getattr(args, "tem_use_support_context", "true"), default=True),
+        readout_mode=getattr(args, "tem_readout_mode", "final"),
+    ).to(_device_string(args))
+
+
 MODEL_REGISTRY: Dict[str, Callable] = {
     "uscmamba": build_uscmamba_from_args,
     "conv64f_token_sw_metric_net": build_conv64f_token_sw_metric_net_from_args,
@@ -195,6 +243,8 @@ MODEL_REGISTRY: Dict[str, Callable] = {
     "episodic_selective_scan_mamba_net": build_episodic_selective_scan_mamba_net_from_args,
     "permutation_robust_class_memory_mamba_net": build_permutation_robust_class_memory_mamba_net_from_args,
     "hierarchical_episodic_ssm_net": build_hierarchical_episodic_ssm_net_from_args,
+    "transport_prior_replay_mamba_net": build_transport_prior_replay_mamba_net_from_args,
+    "transport_evidence_mamba_net": build_transport_evidence_mamba_net_from_args,
 }
 
 
@@ -222,6 +272,14 @@ MODEL_METADATA = {
     "hierarchical_episodic_ssm_net": {
         "display_name": "HierarchicalEpisodicSSMNet",
         "architecture": "Conv64F → token-level SSM → shot-level memory SSM → hierarchical query matcher + SW",
+    },
+    "transport_prior_replay_mamba_net": {
+        "display_name": "TPR-MambaNet",
+        "architecture": "Conv64F → multi-atom support prior calibration → replay-controlled query reader → trajectory transport head",
+    },
+    "transport_evidence_mamba_net": {
+        "display_name": "TEM-Mamba",
+        "architecture": "Conv64F → token serialization → prefix transport evidence → selective evidence reader → shared scalar scorer",
     },
 }
 

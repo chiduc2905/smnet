@@ -25,6 +25,8 @@ NEW_MODELS = [
     "episodic_selective_scan_mamba_net",
     "permutation_robust_class_memory_mamba_net",
     "hierarchical_episodic_ssm_net",
+    "transport_prior_replay_mamba_net",
+    "transport_evidence_mamba_net",
 ]
 
 
@@ -80,6 +82,18 @@ def default_args(model_name: str) -> Namespace:
         permutation_consistency_weight=0.1,
         hierarchical_token_depth=1,
         hierarchical_shot_depth=1,
+        num_support_atoms=4,
+        num_prior_atoms=4,
+        prior_bank_size=16,
+        prior_bank_atoms_per_entry=4,
+        prior_bank_topk=4,
+        trajectory_transport_weight=8.0,
+        confidence_logit_weight=0.5,
+        tem_evidence_dim=None,
+        tem_serialization_orders="row_major,row_major_reverse,column_major,column_major_reverse",
+        tem_use_delta="true",
+        tem_use_support_context="true",
+        tem_readout_mode="final",
     )
 
 
